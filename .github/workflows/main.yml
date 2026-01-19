@@ -103,8 +103,23 @@ jobs:
           # 配置内核
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
           
+          # 修复：先构建内核以生成必要的头文件和符号
+          echo "正在构建内核以生成必要的头文件..."
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error prepare
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error modules_prepare
+          
+          # 修复堆栈保护器参数问题
+          echo "检查并修复堆栈保护器配置..."
+          if grep -q "CONFIG_STACKPROTECTOR=y" out/.config; then
+            echo "禁用堆栈保护器以避免编译错误..."
+            sed -i 's/CONFIG_STACKPROTECTOR=y/CONFIG_STACKPROTECTOR=n/' out/.config
+            sed -i 's/CONFIG_STACKPROTECTOR_STRONG=y/CONFIG_STACKPROTECTOR_STRONG=n/' out/.config
+            sed -i 's/CONFIG_CC_STACKPROTECTOR=y/CONFIG_CC_STACKPROTECTOR=n/' out/.config
+          fi
+          
           # 构建驱动模块
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error M=drivers/kerneldriver modules
+          echo "正在构建驱动模块..."
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+="-O2 -Wno-error -Wno-stack-protector" M=drivers/kerneldriver modules
           
           echo "内核模块构建完成！"
           echo "生成的模块文件："
