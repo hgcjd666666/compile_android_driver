@@ -1,86 +1,66 @@
-**Read this in other languages: [English](README.md), [中文](README_zh.md).**
-# Automated Kernel Driver Builder
+**其他语言版本: [English](README.md), [中文](README_zh.md).**
+# 自动化内核驱动构建工具
+本 GitHub Action 可在云端自动化编译 Android 内核驱动程序，无需本地编译环境。解决访问 Google 源码仓库等问题，编译时间控制在 30min内。
 
-This GitHub Action automates the process of building Android kernel drivers in the cloud, eliminating the need for local compilation environments. It solves common issues like accessing Google's source repositories and reduces compilation time to under 30min.
+## 核心功能
 
-## Key Features
+- ✅ **云端编译** - 无需本地环境配置
+- ✅ **参数化输入** - 通过工作流参数自定义构建
+- ✅ **结果打包** - 下载编译好的驱动和内核镜像
 
-- ✅ **Cloud-based compilation** - No local setup required
-- ✅ **Automatic source handling** - Fetches official Android kernel sources
-- ✅ **Version-aware building** - Automatically selects correct build system
-- ✅ **Parameterized inputs** - Customize builds via workflow inputs
-- ✅ **Artifact packaging** - Downloads compiled drivers and kernel images
+## 使用指南
 
-## Usage Guide
+### 1. 仓库设置
+1. 在仓库中创建 `code` 目录
+2. 将以下文件放入 `code` 目录：
+   - 驱动源文件 (`.c` 和 `.h`)
+   - 驱动的 `Makefile`
+   - 其他依赖文件
 
-### 1. Repository Setup
-1. Create a `code` directory in your repository
-2. Place these files in the `code` directory:
-   - Driver source files (`.c` and `.h`)
-   - `Makefile` for your driver
-   - Any additional dependencies
+### 2. 运行工作流
+1. 转到 GitHub 仓库的 **Actions** 标签页
+2. 选择工作流
+3. 点击 **Run workflow**
+4. 提供以下参数：
+   - `driver_name`: 驱动文件名 (例如 `mydriver.ko`)
 
-### 2. Running the Workflow
-1. Go to your GitHub repository's **Actions** tab
-2. Select **Android Kernel Driver Builder**
-3. Click **Run workflow**
-4. Provide these parameters:
-   - `android_version`: Your Android version (Kernel) (e.g., `14`)
-   - `kernel_version`: Kernel version (e.g., `6.1`)
-   - `driver_name`: Your driver filename (e.g., `mydriver.ko`)
-   - `target_arch`: Device architecture (default: `aarch64`)
+### 3. 获取结果
+编译成功后 (30 分钟)：
+1. 转到完成的工作流运行
+2. 下载 `kernel-driver-<架构>` 产物
+3. 解压后包含：
+   - 编译好的驱动 (`.ko` 文件)
+   - 内核镜像 (`boot.img`)
+   - 构建日志
 
-### 3. Retrieving Results
-After successful compilation (30minutes):
-1. Go to the completed workflow run
-2. Download the `kernel-driver-<arch>` artifact
-3. Extract to find:
-   - Compiled driver (`.ko` file)
-   - Kernel images (`boot.img`)
-   - Build logs
+## 配置参考
 
-## Configuration Reference
+### 输入参数
 
-### Input Parameters
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `driver_name` | 驱动文件名 | `custom_driver.ko` |
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `android_version` | Android OS version | `11`, `12`, `13`, `14` |
-| `kernel_version` | Linux kernel version | `5.10`, `5.15`, `6.1` |
-| `driver_name` | Output driver filename | `custom_driver.ko` |
-| `target_arch` | Device CPU architecture | `aarch64`, `x86_64` |
+### 技术说明
 
-### Technical Notes
+1. **驱动集成**：
+   - 自动将驱动添加到内核构建系统
+   - 注册驱动为 GKI 模块
+   - 自动处理 Makefile 修改
 
-1. **Build System Selection**:
-   - Android 11 and earlier: Legacy `build.sh` system
-   - Android 12 and later: Modern Bazel build system
+## 故障排除
 
-2. **Source Management**:
-   - Automatically fetches kernel sources from Google's repositories
-   - Uses parallel downloading for faster sync
+**Q: "repo sync" 步骤失败**  
+A: 重新运行工作流，Google 服务器偶尔会出现超时
 
-3. **Driver Integration**:
-   - Automatically adds driver to kernel build system
-   - Registers driver as GKI module
-   - Handles Makefile modifications
+**Q: 输出产物中找不到驱动文件**  
+A: 检查：
+- `driver_name` 参数是否正确（需与 Makefile 匹配）
+- 源文件是否在 `/code` 目录
+- Makefile 是否生成预期的 `.ko` 文件
 
-## Troubleshooting
+**Q: 出现 "Kernel configuration not found" 错误**  
+A: 确认内核版本在 [Android 内核源码](https://android.googlesource.com/kernel/manifest/) 中存在对应分支
 
-**Q: Build fails with "repo sync" errors**  
-A: Retry the workflow. Google's servers can occasionally timeout.
 
-**Q: Driver not found in output artifacts**  
-A: Verify:
-- Correct `driver_name` parameter (must match Makefile)
-- Source files are in `/code` directory
-- Makefile produces expected `.ko` filename
-
-**Q: "Kernel configuration not found" error**  
-A: Confirm your kernel_version matches existing branches at [Android Kernel Sources](https://android.googlesource.com/kernel/manifest/)
-
-## Support
-
-For issues and feature requests:
-- [Open an Issue](https://github.com/systemnb/compile_android_driver/issues)
-- Provide workflow logs and input parameters
+补充：固定使用一加ace5竞速版内核源码编译
