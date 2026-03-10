@@ -19,6 +19,10 @@ def now_ts() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 def redact_value(s: str, patterns: List[str]) -> str:
+    """
+    Redact sensitive substrings in logs.
+    Patterns are treated as literal substrings.
+    """
     out = s
     for p in patterns:
         if p and p in out:
@@ -45,6 +49,7 @@ class Logger:
 
     def _emit(self, level: str, msg: str):
         if self._lines_written >= self.max_log_lines:
+            # Prevent runaway logs
             return
         line = f"[{now_ts()}] [{level}] {msg}"
         line = redact_value(line, self.redact_patterns)
@@ -78,6 +83,9 @@ def deep_merge(a, b):
     return out
 
 def expand_env_in_obj(obj: Any) -> Any:
+    """
+    Recursively expand environment variables and ~ in all string values.
+    """
     if isinstance(obj, dict):
         return {k: expand_env_in_obj(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -90,6 +98,9 @@ def load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 def run_cmd_stream(logger: Logger, cmd: str, cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None, show_cmd: bool = True) -> Tuple[int, List[str]]:
+    """
+    Run a shell command, stream output line-by-line, return (rc, last_lines).
+    """
     if show_cmd:
         logger.info(f"RUN: {cmd}")
         if cwd:
@@ -108,7 +119,7 @@ def run_cmd_stream(logger: Logger, cmd: str, cwd: Optional[str] = None, env: Opt
     )
 
     last_lines: List[str] = []
-    max_tail = 200
+    max_tail = 200  # store last 200 lines for error context
 
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -122,6 +133,13 @@ def run_cmd_stream(logger: Logger, cmd: str, cwd: Optional[str] = None, env: Opt
     return rc, last_lines
 
 def find_plugin_dir(logger: Logger, plugin_name: str) -> Path:
+    """
+    Locate plugin directory in CI environment.
+    Tries:
+      1) lyenv plugin path <name>
+      2) $LYENV_HOME/plugins/<name>
+      3) search manifest.yaml under $LYENV_HOME
+    """
     # 1) lyenv plugin path
     try:
         out = subprocess.check_output(["bash", "-lc", f"lyenv plugin path {shlex.quote(plugin_name)}"], text=True).strip()
@@ -134,11 +152,13 @@ def find_plugin_dir(logger: Logger, plugin_name: str) -> Path:
 
     lyenv_home = os.environ.get("LYENV_HOME", "")
     if lyenv_home:
+        # 2) common layout
         p = Path(lyenv_home).joinpath("plugins", plugin_name)
         if p.exists():
             logger.info(f"plugin_dir resolved by $LYENV_HOME/plugins: {p.resolve()}")
             return p.resolve()
 
+        # 3) search manifest.yaml
         root = Path(lyenv_home)
         for m in root.rglob("manifest.yaml"):
             try:
@@ -152,6 +172,9 @@ def find_plugin_dir(logger: Logger, plugin_name: str) -> Path:
     raise RuntimeError(f"Cannot locate plugin directory for '{plugin_name}' (LYENV_HOME={lyenv_home})")
 
 def safe_summary(obj: Any, limit: int = 4000) -> str:
+    """
+    JSON summary for logs (limited size).
+    """
     try:
         s = json.dumps(obj, ensure_ascii=False, sort_keys=True)
         if len(s) > limit:
@@ -161,6 +184,9 @@ def safe_summary(obj: Any, limit: int = 4000) -> str:
         return str(obj)
 
 def dump_env(logger: Logger):
+    """
+    Print key environment values helpful for CI debugging (redacted).
+    """
     keys = [
         "GITHUB_WORKSPACE",
         "GITHUB_REPOSITORY",
@@ -182,6 +208,7 @@ def dump_env(logger: Logger):
 # ---------------------------
 
 def main():
+    # -------- parse args --------
     config_path = None
     debug = False
     quiet = False
@@ -225,6 +252,7 @@ def main():
     if not config_path or not config_path.exists():
         raise SystemExit("Missing --config <kadeflow.yaml> or file not found.")
 
+    # Auto-redact common secrets if present
     for k in ["GITHUB_TOKEN", "TOKEN", "SECRET", "PASSWORD"]:
         v = os.environ.get(k, "")
         if v:
@@ -238,6 +266,7 @@ def main():
         logger.info(f"cwd={os.getcwd()}")
         dump_env(logger)
 
+        # -------- load config --------
         flow = load_yaml(config_path)
         logger.info(f"Loaded config: {config_path}")
         logger.dbg(f"Config full (summary): {safe_summary(flow)}")
@@ -251,6 +280,7 @@ def main():
         if plugin_source:
             logger.info(f"project.plugin_source={plugin_source}")
 
+        # -------- install plugin --------
         if plugin_source:
             rc, tail = run_cmd_stream(logger, f"lyenv plugin install {shlex.quote(plugin_source)}")
         else:
@@ -263,9 +293,11 @@ def main():
         plugin_dir = find_plugin_dir(logger, plugin_name)
         cfg_path = plugin_dir / "config.yaml"
 
+        # -------- apply config overrides to plugin config.yaml --------
         overrides = flow.get("kade", {}).get("config_overrides", {}) or {}
         overrides = expand_env_in_obj(overrides)
 
+        # Log key fields (important for debugging path issues)
         def _get(d, path, default=""):
             cur = d
             for part in path.split("."):
@@ -278,10 +310,12 @@ def main():
         kernel_flavor = _get(overrides, "kernel.flavor", "")
         logger.info(f"[overrides] kernel.flavor={kernel_flavor}")
 
+        # Show driver path (gki)
         ext_src = _get(overrides, "gki.driver.external_src_dir", "")
         if ext_src:
             logger.info(f"[overrides] gki.driver.external_src_dir={ext_src}")
 
+        # Load existing plugin config if present
         base_cfg = {}
         if cfg_path.exists():
             try:
@@ -291,26 +325,22 @@ def main():
 
         merged_cfg = deep_merge(base_cfg, overrides)
 
-        # ---------- 新增：通过环境变量覆盖 kernel.flavor ----------
-        override_flavor = os.environ.get("KADEFLOW_KERNEL_FLAVOR")
-        if override_flavor:
-            logger.info(f"Overriding kernel.flavor from env: {override_flavor}")
-            if "kernel" not in merged_cfg:
-                merged_cfg["kernel"] = {}
-            merged_cfg["kernel"]["flavor"] = override_flavor
-        # -----------------------------------------------------------
-
+        # Write back plugin config
         cfg_path.write_text(yaml.safe_dump(merged_cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
         logger.info(f"Wrote plugin config: {cfg_path}")
 
+        # Print a short config digest
         logger.dbg(f"plugin config (summary): {safe_summary(merged_cfg)}")
 
+        # -------- build command list --------
         steps = flow.get("flow", {}).get("steps", []) or []
         post_cmds = flow.get("flow", {}).get("post_commands", []) or []
 
+        # ABI injection logic
         abi = flow.get("abi", {}) or {}
         upstream_patch = bool(abi.get("upstream_patch", True))
 
+        # Ensure abi_upstream exists if enabled
         if upstream_patch and not any(s.strip().startswith("kade abi_upstream") for s in steps):
             inserted = False
             for idx, s in enumerate(steps):
@@ -321,6 +351,7 @@ def main():
             if not inserted:
                 steps.append("kade abi_upstream")
 
+        # Inject kade abi command if symbols provided
         abi_cmd = ""
         symbols_file = abi.get("symbols_file", "")
         symbols = abi.get("symbols", [])
@@ -344,6 +375,7 @@ def main():
             if not inserted:
                 steps.append(abi_cmd)
 
+        # Expand variables in commands and log final plan
         env = os.environ.copy()
         expanded_steps = [os.path.expandvars(os.path.expanduser(s)) for s in steps]
         expanded_post = [os.path.expandvars(os.path.expanduser(s)) for s in post_cmds]
@@ -356,6 +388,7 @@ def main():
             for s in expanded_post:
                 logger.info(f"  - {s}")
 
+        # -------- run steps --------
         for cmd in expanded_steps:
             rc, tail = run_cmd_stream(logger, cmd, cwd=os.getcwd(), env=env)
             if rc != 0:
@@ -363,12 +396,14 @@ def main():
                 logger.error("Last output lines:")
                 for line in tail[-60:]:
                     logger.error(line)
+                # Common hints
                 logger.error("Hints:")
                 logger.error("  - Check whether env vars in paths were expanded correctly.")
                 logger.error("  - If using 'kade abi --file', verify the file exists and contains valid symbol names.")
                 logger.error("  - If you see '__KSYM_/path/to/file', a file path was treated as a symbol. Check ABI injection and symbols file contents.")
                 raise SystemExit(rc)
 
+        # -------- run post commands --------
         for cmd in expanded_post:
             rc, tail = run_cmd_stream(logger, cmd, cwd=os.getcwd(), env=env)
             if rc != 0:

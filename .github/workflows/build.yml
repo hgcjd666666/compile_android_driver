@@ -1,0 +1,160 @@
+name: kade build (lyenv + kade) - Multi-version
+
+on:
+  workflow_dispatch:
+    inputs:
+      flow_config:
+        description: "Path to kadeflow.yaml"
+        required: true
+        default: "kadeflow.yaml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # 一个版本失败不影响其他
+      matrix:
+        version:
+          - { tag: "android12-5.10", flavor: "5.10" }
+          - { tag: "android13-5.10", flavor: "5.10" }
+          - { tag: "android13-5.15", flavor: "5.15" }
+          - { tag: "android14-5.15", flavor: "5.15" }
+          - { tag: "android14-6.1",  flavor: "6.1" }
+          - { tag: "android15-6.6",  flavor: "6.6" }
+          - { tag: "android16-6.12", flavor: "6.12" }
+
+    env:
+      LYENV_HOME: ${{ github.workspace }}/.lyenv_home
+      KADEFLOW_KERNEL_FLAVOR: ${{ matrix.version.flavor }}   # 传递给 run_kadeflow.py 的环境变量
+      VERSION_TAG: ${{ matrix.version.tag }}                 # 用于模块重命名
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal bootstrap deps
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y make git curl python3 python3-pip zip
+
+      - name: Cache (LYENV_HOME caches)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.LYENV_HOME }}/cache
+            ${{ env.LYENV_HOME }}/ccache
+            ${{ env.LYENV_HOME }}/bazel-cache
+          key: kade-cache-${{ runner.os }}-${{ matrix.version.flavor }}-${{ hashFiles('kadeflow.yaml', 'config.yaml') }}
+          restore-keys: |
+            kade-cache-${{ runner.os }}-${{ matrix.version.flavor }}-
+            kade-cache-${{ runner.os }}-
+
+      - name: Install lyenv
+        run: |
+          set -eux
+          mkdir -p "${LYENV_HOME}"
+          git clone https://github.com/systemnb/lyenv "${GITHUB_WORKSPACE}/_lyenv"
+          cd "${GITHUB_WORKSPACE}/_lyenv"
+          make install
+
+      - name: Create & activate project
+        run: |
+          set -eux
+          PROJECT="ci-kade"
+          lyenv create "${PROJECT}"
+          cd "${PROJECT}"
+          lyenv init .
+          eval "$(lyenv activate)"
+          echo "LYENV_HOME=${LYENV_HOME}"
+          which lyenv
+
+      - name: Run kade flow
+        run: |
+          set -eux
+          python3 -m pip install --user pyyaml
+          PROJECT="ci-kade"
+          cd "${GITHUB_WORKSPACE}/${PROJECT}"
+          eval "$(lyenv activate)"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/run_kadeflow.py" \
+            --config "${GITHUB_WORKSPACE}/${{ github.event.inputs.flow_config }}" \
+            --debug \
+            --log-file "${GITHUB_WORKSPACE}/kadeflow-${{ matrix.version.tag }}.log"
+
+      # ----- 步骤：收集并重命名指定模块（精简上传） -----
+      - name: Collect and rename kernel modules (lightweight)
+        run: |
+          set -eux
+          # 确定构建输出目录（根据 kade 默认行为，通常为 workspace/exports 或 workspace/img_out）
+          # 如果 exports 存在则优先使用，否则使用 img_out
+          PROJECT_DIR="${GITHUB_WORKSPACE}/ci-kade"
+          if [ -d "${PROJECT_DIR}/workspace/exports" ]; then
+            OUTPUT_DIR="${PROJECT_DIR}/workspace/exports"
+          elif [ -d "${PROJECT_DIR}/workspace/img_out" ]; then
+            OUTPUT_DIR="${PROJECT_DIR}/workspace/img_out"
+          else
+            echo "ERROR: Cannot find output directory (exports or img_out)" >&2
+            exit 1
+          fi
+
+          # 收集目录
+          COLLECT_DIR="${GITHUB_WORKSPACE}/lightweight_modules/${{ matrix.version.tag }}"
+          mkdir -p "${COLLECT_DIR}"
+
+          # 调用收集脚本
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/collect_modules.py" \
+            --makefile-dir "${GITHUB_WORKSPACE}/code" \
+            --output-dir "${OUTPUT_DIR}" \
+            --version-tag "${{ matrix.version.tag }}" \
+            --collect-dir "${COLLECT_DIR}"
+
+      - name: Upload lightweight modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: kade-modules-${{ matrix.version.tag }}
+          path: ${{ github.workspace }}/lightweight_modules/${{ matrix.version.tag }}/
+          if-no-files-found: warn
+
+      # ----- 步骤：打包并上传完整产物（ZIP 压缩） -----
+      - name: Create full artifacts archive
+        run: |
+          set -eux
+          PROJECT_DIR="${GITHUB_WORKSPACE}/ci-kade"
+          FULL_ARTIFACTS_DIR="${GITHUB_WORKSPACE}/full_artifacts"
+          mkdir -p "${FULL_ARTIFACTS_DIR}"
+
+          # 复制需要打包的目录/文件到一个临时目录，然后压缩
+          TEMP_DIR="${FULL_ARTIFACTS_DIR}/temp_${{ matrix.version.tag }}"
+          mkdir -p "${TEMP_DIR}"
+
+          # 复制 workspace 下 exports 和 img_out 中的文件（保留目录结构）
+          if [ -d "${PROJECT_DIR}/workspace/exports" ]; then
+            cp -r --parents "${PROJECT_DIR}/workspace/exports" "${TEMP_DIR}/"
+          fi
+          if [ -d "${PROJECT_DIR}/workspace/img_out" ]; then
+            cp -r --parents "${PROJECT_DIR}/workspace/img_out" "${TEMP_DIR}/"
+          fi
+          # 复制 compile_commands.json（可能位于 workspace 下任何子目录）
+          find "${PROJECT_DIR}/workspace" -name "compile_commands.json" -exec cp --parents {} "${TEMP_DIR}/" \;
+          # 复制根目录下的 img_out（如果存在）
+          if [ -d "${GITHUB_WORKSPACE}/img_out" ]; then
+            cp -r "${GITHUB_WORKSPACE}/img_out" "${TEMP_DIR}/"
+          fi
+
+          # 创建 ZIP 包
+          cd "${TEMP_DIR}"
+          zip -r "${FULL_ARTIFACTS_DIR}/full-artifacts-${{ matrix.version.tag }}.zip" .
+          cd "${GITHUB_WORKSPACE}"
+          rm -rf "${TEMP_DIR}"
+
+      - name: Upload full artifacts archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-artifacts-${{ matrix.version.tag }}
+          path: ${{ github.workspace }}/full_artifacts/full-artifacts-${{ matrix.version.tag }}.zip
+          if-no-files-found: warn
