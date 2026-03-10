@@ -1,0 +1,68 @@
+name: Build LKM for Multiple KMI
+
+on:
+  workflow_dispatch:
+  # 如果需要被其他 workflow 调用，保留 workflow_call
+  # workflow_call:
+
+jobs:
+  build-lkm:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    uses: ./.github/workflows/build-module.yml
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: '20251104'
+      source_dir: 'code'                # 你的模块源码目录
+      # 如果不指定 module_name，build-module.yml 会自动解析 Makefile
+
+  # ---------- 新增汇总作业 ----------
+  package-all:
+    name: Package all modules into one ZIP
+    runs-on: ubuntu-latest
+    needs: build-lkm                # 等待所有矩阵任务完成
+    if: always()                    # 即使部分失败也运行，打包已成功的产物
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded_artifacts   # 所有 artifact 将下载到此目录的子文件夹中
+          merge-multiple: false        # 保留每个 artifact 的独立文件夹
+
+      - name: Create a single ZIP with all .ko files
+        run: |
+          # 创建一个目录存放所有 .ko 文件
+          mkdir -p all_modules
+
+          # 遍历每个 artifact 文件夹，将其中的 .ko 文件复制到 all_modules
+          find downloaded_artifacts -type f -name "*.ko" -exec cp {} all_modules/ \;
+
+          # 检查是否找到了文件
+          if [ -z "$(ls -A all_modules)" ]; then
+            echo "No .ko files found to package!" >&2
+            exit 1
+          fi
+
+          # 压缩
+          cd all_modules
+          zip -r ../all-modules.zip .
+          cd ..
+
+          echo "Created all-modules.zip containing:"
+          unzip -l all-modules.zip
+
+      - name: Upload the combined ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: all
+          path: all.zip
