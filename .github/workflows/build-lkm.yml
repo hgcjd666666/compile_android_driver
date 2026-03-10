@@ -18,12 +18,12 @@ jobs:
           - android14-6.1
           - android15-6.6
           - android16-6.12
-    uses: ./.github/workflows/build-module.yml
+    uses: ./.github/workflows/ddk-lkm.yml
     with:
       kmi: ${{ matrix.kmi }}
       ddk_release: '20251104'
       source_dir: 'code'                # 你的模块源码目录
-      # 如果不指定 module_name，build-module.yml 会自动解析 Makefile
+      # 如果不指定 module_name，ddk-lkm.yml 会自动解析 Makefile
 
   # ---------- 新增汇总作业 ----------
   package-all:
