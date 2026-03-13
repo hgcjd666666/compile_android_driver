@@ -1,6 +1,6 @@
 /*
  * libart_bypass_lkm.c - LKM to intercept libart.so reads and return in-memory content.
- * Enhanced with path verification and inode tracking to prevent fake library detection.
+ * Version with proper includes and compatibility fixes.
  */
 
 #include <linux/module.h>
@@ -19,12 +19,13 @@
 #include <linux/spinlock.h>
 #include <linux/dcache.h>
 #include <linux/path.h>
+#include <linux/kallsyms.h>    // 必须包含，用于 kallsyms_lookup_name
 #include <asm/unistd.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Your Name");
 MODULE_DESCRIPTION("Bypass libart.so integrity check with path verification");
-MODULE_VERSION("2.0");
+MODULE_VERSION("2.1");
 
 // ======================== 日志控制 ========================
 #define ENABLE_DEBUG 0
@@ -51,7 +52,7 @@ static DEFINE_SPINLOCK(monitored_lock);
 // 查找当前进程的监控项
 static struct monitored_fd *find_my_monitored_fd(int fd)
 {
-    pid_t current_pid = current->tgid;
+    pid_t current_pid = task_tgid_nr(current);  // 使用 task_tgid_nr 代替 current->tgid
     struct monitored_fd *entry;
 
     spin_lock(&monitored_lock);
@@ -69,7 +70,7 @@ static struct monitored_fd *find_my_monitored_fd(int fd)
 static void add_monitored_fd(int fd, struct file *filp)
 {
     struct monitored_fd *m;
-    pid_t current_pid = current->tgid;
+    pid_t current_pid = task_tgid_nr(current);
     struct inode *inode = filp->f_inode;
 
     if (!inode)
@@ -160,9 +161,9 @@ static int get_libart_base(struct mm_struct *mm, unsigned long *base, size_t *si
     up_read(&mm->mmap_lock);
 
     if (ret == 0)
-        logv("found libart.so in pid %d: base=0x%lx, size=%zu\n", current->tgid, *base, *size);
+        logv("found libart.so in pid %d: base=0x%lx, size=%zu\n", task_tgid_nr(current), *base, *size);
     else
-        logv("libart.so not found in pid %d\n", current->tgid);
+        logv("libart.so not found in pid %d\n", task_tgid_nr(current));
 
     return ret;
 }
@@ -292,8 +293,9 @@ asmlinkage long hook_close(int fd)
 // ======================== 模块初始化与退出 ========================
 static int __init libart_bypass_init(void)
 {
-    printk(KERN_INFO "libart bypass LKM loading (v2 with path verification)...\n");
+    printk(KERN_INFO "libart bypass LKM loading (v2.1 with path verification)...\n");
 
+    // kallsyms_lookup_name 返回 unsigned long，需要强制转换
     sys_call_table = (unsigned long *)kallsyms_lookup_name("sys_call_table");
     if (!sys_call_table) {
         printk(KERN_ERR "libart: failed to find sys_call_table\n");
