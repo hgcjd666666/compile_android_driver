@@ -1,4 +1,4 @@
-obj-m += NoCheckHook.o
+obj-m += file_copy.o
 
 
 ifneq ($(KDIR),)
