@@ -14,7 +14,7 @@ struct probe_data {
     size_t old_count;
 };
 
-static int seq_write_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct probe_data *d = (struct probe_data *)ri->data;
     d->m = (struct seq_file *)regs->regs[0];
@@ -22,7 +22,7 @@ static int seq_write_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
     return 0;
 }
 
-static int seq_write_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct probe_data *d = (struct probe_data *)ri->data;
     struct seq_file *m = d->m;
@@ -31,7 +31,7 @@ static int seq_write_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     char *p;
     size_t len;
 
-    if (!m || m->count <= old_count)
+    if (!m || m->count <= old_count || m->count > m->size)
         return 0;
 
     file = READ_ONCE(m->file);
@@ -53,19 +53,37 @@ static int seq_write_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     return 0;
 }
 
-static struct kretprobe rp = {
-    .kp.symbol_name = "seq_write",
-    .entry_handler = seq_write_entry,
-    .handler = seq_write_ret,
+static struct kretprobe rp_puts = {
+    .kp.symbol_name = "seq_puts",
+    .entry_handler = entry_handler,
+    .handler = ret_handler,
+    .data_size = sizeof(struct probe_data),
+    .maxactive = 128,
+};
+
+static struct kretprobe rp_vprintf = {
+    .kp.symbol_name = "seq_vprintf",
+    .entry_handler = entry_handler,
+    .handler = ret_handler,
     .data_size = sizeof(struct probe_data),
     .maxactive = 128,
 };
 
 static int __init hide_init(void)
 {
-    int ret = register_kretprobe(&rp);
+    int ret;
+
+    ret = register_kretprobe(&rp_puts);
+    if (ret < 0)
+        printk(KERN_WARNING "hide_mounts: seq_puts probe failed: %d\n", ret);
+    else
+        printk(KERN_INFO "hide_mounts: seq_puts probed\n");
+
+    ret = register_kretprobe(&rp_vprintf);
     if (ret < 0) {
-        printk(KERN_ERR "hide_mounts: register failed: %d\n", ret);
+        printk(KERN_WARNING "hide_mounts: seq_vprintf probe failed: %d\n", ret);
+        if (rp_puts.kp.addr)
+            unregister_kretprobe(&rp_puts);
         return ret;
     }
     printk(KERN_INFO "hide_mounts: loaded\n");
@@ -74,7 +92,10 @@ static int __init hide_init(void)
 
 static void __exit hide_exit(void)
 {
-    unregister_kretprobe(&rp);
+    if (rp_puts.kp.addr)
+        unregister_kretprobe(&rp_puts);
+    if (rp_vprintf.kp.addr)
+        unregister_kretprobe(&rp_vprintf);
     printk(KERN_INFO "hide_mounts: unloaded, filtered=%lld\n",
            atomic64_read(&nr_filtered));
 }
