@@ -12,7 +12,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("filter");
-MODULE_DESCRIPTION("Filter KSU lines in /proc/*/maps via kretprobe");
+MODULE_DESCRIPTION("Filter lines starting with 'KSU ' in /proc/*/maps via kretprobe");
 
 #define DEBUG_LOG(fmt, ...) printk(KERN_INFO "filter_maps: " fmt, ##__VA_ARGS__)
 #define ERROR_LOG(fmt, ...) printk(KERN_ERR "filter_maps: " fmt, ##__VA_ARGS__)
@@ -31,19 +31,14 @@ MODULE_DESCRIPTION("Filter KSU lines in /proc/*/maps via kretprobe");
 #define REG_RET   ax
 #endif
 
-static atomic_t nr_ksu_filtered = ATOMIC_INIT(0);
-static atomic_t nr_calls = ATOMIC_INIT(0);
+static atomic_t nr_filtered = ATOMIC_INIT(0);
 static atomic_t nr_hit = ATOMIC_INIT(0);
 
-static bool contains_ksu(const char *buf, size_t len)
+static bool line_starts_with_ksu(const char *line, size_t len)
 {
-    size_t i;
-    if (!buf || len < 3) return false;
-    if (len > 4096) len = 4096;
-    for (i = 0; i < len - 2; i++)
-        if (buf[i] == 'K' && buf[i+1] == 'S' && buf[i+2] == 'U')
-            return true;
-    return false;
+    if (!line || len < 4)
+        return false;
+    return (line[0] == 'K' && line[1] == 'S' && line[2] == 'U' && line[3] == ' ');
 }
 
 static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -57,9 +52,6 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
     char *line_start, *line_end;
     size_t new_size;
     int filter_count;
-    struct kprobe *kp;
-
-    atomic_inc(&nr_calls);
 
     file = (struct file *)regs->REG_PARM0;
     ubuf = (char __user *)regs->REG_PARM1;
@@ -79,8 +71,6 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
     if (copied > usize)
         copied = usize;
 
-    atomic_inc(&nr_hit);
-
     kbuf = kmalloc(copied + 1, GFP_KERNEL);
     if (!kbuf)
         return 0;
@@ -91,7 +81,24 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
     }
     kbuf[copied] = '\0';
 
-    if (!contains_ksu(kbuf, copied)) {
+    filter_count = 0;
+    line_start = kbuf;
+    while (line_start < kbuf + copied) {
+        size_t remain = kbuf + copied - line_start;
+        line_end = memchr(line_start, '\n', remain);
+        if (!line_end)
+            line_end = kbuf + copied;
+        else
+            line_end++;
+
+        size_t line_len = line_end - line_start;
+        if (line_starts_with_ksu(line_start, line_len))
+            filter_count++;
+
+        line_start = line_end;
+    }
+
+    if (filter_count == 0) {
         kfree(kbuf);
         return 0;
     }
@@ -105,9 +112,7 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
         }
 
         new_size = 0;
-        filter_count = 0;
         line_start = kbuf;
-
         while (line_start < kbuf + copied) {
             size_t remain = kbuf + copied - line_start;
             line_end = memchr(line_start, '\n', remain);
@@ -117,25 +122,11 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
                 line_end++;
 
             size_t line_len = line_end - line_start;
-            if (line_len > (size_t)(copied + 1)) {
-                kfree(new_buf);
-                kfree(kbuf);
-                return 0;
-            }
-
-            if (!contains_ksu(line_start, line_len)) {
+            if (!line_starts_with_ksu(line_start, line_len)) {
                 memcpy(new_buf + new_size, line_start, line_len);
                 new_size += line_len;
-            } else {
-                filter_count++;
             }
             line_start = line_end;
-        }
-
-        if (filter_count == 0) {
-            kfree(new_buf);
-            kfree(kbuf);
-            return 0;
         }
 
         if (new_size > 0) {
@@ -146,14 +137,15 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
             }
             if (new_size < copied)
                 clear_user(ubuf + new_size, copied - new_size);
+        } else {
+            clear_user(ubuf, copied);
         }
 
         regs->REG_RET = new_size;
-        atomic_add(filter_count, &nr_ksu_filtered);
-
-        DEBUG_LOG("hit: filtered %d lines, %zu->%zu bytes, total_filtered=%d\n",
+        atomic_add(filter_count, &nr_filtered);
+        DEBUG_LOG("filtered %d KSU lines, %zu->%zu bytes, total=%d\n",
                   filter_count, copied, new_size,
-                  atomic_read(&nr_ksu_filtered));
+                  atomic_read(&nr_filtered));
 
         kfree(new_buf);
     }
@@ -172,18 +164,15 @@ static int __init filter_init(void)
 {
     int ret;
 
-    atomic_set(&nr_calls, 0);
     atomic_set(&nr_hit, 0);
-    atomic_set(&nr_ksu_filtered, 0);
+    atomic_set(&nr_filtered, 0);
 
     ret = register_kretprobe(&rp);
     if (ret < 0) {
-        ERROR_LOG("register_kretprobe on seq_read failed: %d\n", ret);
-
         rp.kp.symbol_name = "seq_read_iter";
         ret = register_kretprobe(&rp);
         if (ret < 0) {
-            ERROR_LOG("register_kretprobe on seq_read_iter also failed: %d\n", ret);
+            ERROR_LOG("failed to register on seq_read or seq_read_iter: %d\n", ret);
             return ret;
         }
         DEBUG_LOG("loaded on seq_read_iter, addr=0x%px\n", rp.kp.addr);
@@ -197,10 +186,9 @@ static int __init filter_init(void)
 static void __exit filter_exit(void)
 {
     unregister_kretprobe(&rp);
-    DEBUG_LOG("unloaded: calls=%d hits=%d filtered=%d\n",
-              atomic_read(&nr_calls),
+    DEBUG_LOG("unloaded, hits=%d filtered=%d\n",
               atomic_read(&nr_hit),
-              atomic_read(&nr_ksu_filtered));
+              atomic_read(&nr_filtered));
 }
 
 module_init(filter_init);
