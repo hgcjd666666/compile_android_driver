@@ -1,4 +1,4 @@
-name: Build LKM for Multiple KMI
+name: Build LKM (Debug)
 
 on:
   push:
@@ -6,63 +6,16 @@ on:
     paths:
       - 'code/**'
       - '.github/workflows/build-lkm.yml'
-      - '.github/workflows/ddk-lkm.yml'
-      - 'kadeflow.yaml'
-      - 'abi.symbols'
   pull_request:
     branches: [ "main", "master" ]
     paths:
       - 'code/**'
   workflow_dispatch:
-  workflow_call:
 
 jobs:
-  build-lkm:
-    strategy:
-      fail-fast: false
-      matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
+  build:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
-      kmi: ${{ matrix.kmi }}
+      kmi: 'android14-6.1'
       ddk_release: '20260313'
       source_dir: 'code'
-
-  package-all:
-    name: Package all modules into one ZIP
-    runs-on: ubuntu-latest
-    needs: build-lkm
-    if: always()
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: downloaded_artifacts
-
-      - name: Create a single ZIP with all .ko files
-        run: |
-          mkdir -p all_modules
-          find downloaded_artifacts -type f -name "*.ko" -exec cp {} all_modules/ \;
-          if [ -z "$(ls -A all_modules)" ]; then
-            echo "No .ko files found to package!" >&2
-            exit 1
-          fi
-          cd all_modules
-          zip -r ../all-modules.zip .
-          cd ..
-          echo "Created all-modules.zip containing:"
-          unzip -l all-modules.zip
-
-      - name: Upload the combined ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-modules
-          path: all-modules.zip

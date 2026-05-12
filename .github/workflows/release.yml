@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    uses: ./.github/workflows/ddk-lkm.yml
+    with:
+      kmi: ${{ matrix.kmi }}
+      ddk_release: '20260313'
+      source_dir: 'code'
+
+  package:
+    name: Package all modules
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release archive
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "*.ko" -exec cp {} release/ \;
+          cd release
+          ls -la
+          echo "---"
+          for f in *.ko; do
+            echo "$f: $(ls -lh "$f" | awk '{print $5}')"
+          done
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-modules
+          path: release/
