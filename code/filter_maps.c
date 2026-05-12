@@ -14,13 +14,13 @@ static atomic64_t nr_filtered = ATOMIC64_INIT(0);
 
 static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    ri->data = (void *)regs->regs[0];
+    *(struct file **)ri->data = (struct file *)regs->regs[0];
     return 0;
 }
 
 static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct file *file = (struct file *)ri->data;
+    struct file *file = *(struct file **)ri->data;
     struct seq_file *m;
     ssize_t copied = (ssize_t)regs->regs[0];
     char *buf, *src, *dst;
@@ -78,6 +78,7 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 static struct kretprobe rp = {
     .kp.symbol_name = "seq_read",
     .entry_handler = entry_handler,
+    .data_size = sizeof(struct file *),
     .handler = ret_handler,
     .maxactive = 64,
 };
