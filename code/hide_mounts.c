@@ -72,8 +72,8 @@ static int iter_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
         printk(KERN_INFO "hm: iter_ret: no buf\n");
         return 0;
     }
-    printk(KERN_INFO "hm: iter_ret: count=%zu index=%zu size=%zu\n",
-           m->count, (long long)m->index, m->size);
+    printk(KERN_INFO "hm: iter_ret: count=%zu index=%lld size=%zu\n",
+           m->count, m->index, m->size);
 
     if (m->count == 0)
         return 0;
