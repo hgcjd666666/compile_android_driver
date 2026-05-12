@@ -26,7 +26,7 @@ static int seq_write_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct probe_data *d = (struct probe_data *)ri->data;
     struct seq_file *m = d->m;
-    struct file *file;
+    const struct file *file;
     size_t old_count = d->old_count;
     char *p;
     size_t len;
