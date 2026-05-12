@@ -13,8 +13,14 @@ MODULE_AUTHOR("filter");
 MODULE_DESCRIPTION("Filter KSU lines in /proc/*/maps via kretprobe on seq_read");
 
 #if defined(__aarch64__)
-#define REG_RET regs[0]
+#define REG_PARM0 regs[0]
+#define REG_PARM1 regs[1]
+#define REG_PARM2 regs[2]
+#define REG_RET   regs[0]
 #else
+#define REG_PARM0 di
+#define REG_PARM1 si
+#define REG_PARM2 dx
 #define REG_RET ax
 #endif
 
