@@ -8,14 +8,15 @@
 MODULE_LICENSE("GPL");
 
 static atomic64_t nr_filtered = ATOMIC64_INIT(0);
+static atomic64_t nr_calls = ATOMIC64_INIT(0);
 
-/* 扫描并移除 buf 中所有以 "KSU " 开头的行 */
 static void remove_ksu_lines(struct seq_file *m)
 {
     char *buf = m->buf;
     char *src, *dst;
     size_t cnt = m->count;
     char *end = buf + cnt;
+    int n = 0;
 
     src = buf;
     dst = buf;
@@ -25,15 +26,18 @@ static void remove_ksu_lines(struct seq_file *m)
         size_t len = nl ? (nl + 1 - src) : (end - src);
 
         if (len >= 4 && src[0] == 'K' && src[1] == 'S' && src[2] == 'U' && src[3] == ' ') {
-            atomic64_inc(&nr_filtered);
+            n++;
         } else {
-            if (dst != src)
-                memmove(dst, src, len);
+            if (dst != src) memmove(dst, src, len);
             dst += len;
         }
         src += len;
     }
-    m->count = dst - buf;
+    if (n) {
+        m->count = dst - buf;
+        atomic64_add(n, &nr_filtered);
+        printk(KERN_INFO "hm: remove_ksu_lines: %d lines, count=%zu\n", n, m->count);
+    }
 }
 
 struct write_data {
@@ -41,7 +45,7 @@ struct write_data {
     size_t old_count;
 };
 
-/* ── seq_read_iter 用于识别 mounts ── */
+/* seq_read_iter */
 static int iter_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     *(struct kiocb **)ri->data = (struct kiocb *)regs->regs[0];
@@ -61,8 +65,17 @@ static int iter_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     if (strcmp(file->f_path.dentry->d_name.name, "mounts") != 0)
         return 0;
 
+    atomic64_inc(&nr_calls);
+
     m = (struct seq_file *)READ_ONCE(file->private_data);
-    if (!m || !m->buf || m->count == 0)
+    if (!m || !m->buf) {
+        printk(KERN_INFO "hm: iter_ret: no buf\n");
+        return 0;
+    }
+    printk(KERN_INFO "hm: iter_ret: count=%zu index=%zu size=%zu\n",
+           m->count, m->index, m->size);
+
+    if (m->count == 0)
         return 0;
 
     if (!mutex_trylock(&m->lock))
@@ -74,7 +87,7 @@ static int iter_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     return 0;
 }
 
-/* ── seq_puts / seq_vprintf 写入时直接拦截 ── */
+/* seq_puts / seq_vprintf */
 static int wrt_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct write_data *d = (struct write_data *)ri->data;
@@ -88,14 +101,23 @@ static int wrt_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     struct write_data *d = (struct write_data *)ri->data;
     struct seq_file *m = d->m;
     size_t old = d->old_count;
+    size_t wrote;
 
     if (!m || m->count <= old || m->count > m->size)
         return 0;
 
-    if (m->count - old >= 4 &&
+    wrote = m->count - old;
+
+    if (wrote >= 4 &&
         m->buf[old] == 'K' && m->buf[old+1] == 'S' && m->buf[old+2] == 'U' && m->buf[old+3] == ' ') {
         m->count = old;
         atomic64_inc(&nr_filtered);
+        printk(KERN_INFO "hm: blocked KSU line at %zu\n", old);
+    } else if (wrote >= 3 &&
+               m->buf[old] == 'K' && m->buf[old+1] == 'S' && m->buf[old+2] == 'U') {
+        /* "KSU" without space - might be start of KSU field, log it */
+        printk(KERN_INFO "hm: saw 'KSU' (no space) at %zu, wrote=%zu, '%.*s'\n",
+               old, wrote, (int)min(wrote, (size_t)40), m->buf + old);
     }
     return 0;
 }
@@ -127,21 +149,17 @@ static struct kretprobe rp_vprintf = {
 static int __init init_mod(void)
 {
     int r;
-
     r = register_kretprobe(&rp_iter);
-    if (r < 0) printk(KERN_WARNING "hide_mounts: iter failed: %d\n", r);
-
+    if (r < 0) printk(KERN_WARNING "hm: iter failed: %d\n", r);
     r = register_kretprobe(&rp_puts);
-    if (r < 0) printk(KERN_WARNING "hide_mounts: puts failed: %d\n", r);
-
+    if (r < 0) printk(KERN_WARNING "hm: puts failed: %d\n", r);
     r = register_kretprobe(&rp_vprintf);
     if (r < 0) {
-        printk(KERN_WARNING "hide_mounts: vprintf failed: %d\n", r);
+        printk(KERN_WARNING "hm: vprintf failed: %d\n", r);
         if (rp_puts.kp.addr)  unregister_kretprobe(&rp_puts);
         if (rp_iter.kp.addr)  unregister_kretprobe(&rp_iter);
         return r;
     }
-
     printk(KERN_INFO "hide_mounts: loaded\n");
     return 0;
 }
@@ -151,8 +169,8 @@ static void __exit exit_mod(void)
     if (rp_vprintf.kp.addr) unregister_kretprobe(&rp_vprintf);
     if (rp_puts.kp.addr)    unregister_kretprobe(&rp_puts);
     if (rp_iter.kp.addr)    unregister_kretprobe(&rp_iter);
-    printk(KERN_INFO "hide_mounts: unloaded, filtered=%lld\n",
-           atomic64_read(&nr_filtered));
+    printk(KERN_INFO "hide_mounts: unloaded, calls=%lld filtered=%lld\n",
+           atomic64_read(&nr_calls), atomic64_read(&nr_filtered));
 }
 
 module_init(init_mod);
