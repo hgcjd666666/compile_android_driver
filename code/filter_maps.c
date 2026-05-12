@@ -9,39 +9,22 @@
 #include <linux/mutex.h>
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("filter");
-MODULE_DESCRIPTION("Filter KSU lines in /proc/*/maps via kretprobe on seq_read");
-
-#if defined(__aarch64__)
-#define REG_PARM0 regs[0]
-#define REG_PARM1 regs[1]
-#define REG_PARM2 regs[2]
-#define REG_RET   regs[0]
-#else
-#define REG_PARM0 di
-#define REG_PARM1 si
-#define REG_PARM2 dx
-#define REG_RET ax
-#endif
 
 static atomic64_t nr_filtered = ATOMIC64_INIT(0);
 
-static bool line_is_ksu(const char *p, size_t len)
+static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    return len >= 4 && p[0] == 'K' && p[1] == 'S' && p[2] == 'U' && p[3] == ' ';
+    ri->data = (void *)regs->regs[0];
+    return 0;
 }
 
-static int handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct file *file;
+    struct file *file = (struct file *)ri->data;
     struct seq_file *m;
-    ssize_t copied;
-    char *buf;
-    char *src, *dst;
+    ssize_t copied = (ssize_t)regs->regs[0];
+    char *buf, *src, *dst;
     int filtered;
-
-    file = (struct file *)regs->REG_PARM0;
-    copied = (ssize_t)regs->REG_RET;
 
     if (copied <= 0 || !file || !file->f_path.dentry)
         return 0;
@@ -84,10 +67,8 @@ static int handler(struct kretprobe_instance *ri, struct pt_regs *regs)
         size_t new_count = dst - buf;
         m->count = new_count;
         m->index = 0;
-        regs->REG_RET = new_count;
+        regs->regs[0] = new_count;
         atomic64_add(filtered, &nr_filtered);
-        printk(KERN_INFO "filter_maps: filtered %d lines, new_count=%zu\n",
-               filtered, new_count);
     }
 
     mutex_unlock(&m->lock);
@@ -96,7 +77,8 @@ static int handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 static struct kretprobe rp = {
     .kp.symbol_name = "seq_read",
-    .handler = handler,
+    .entry_handler = entry_handler,
+    .handler = ret_handler,
     .maxactive = 64,
 };
 
@@ -114,7 +96,7 @@ static int __init filter_init(void)
 static void __exit filter_exit(void)
 {
     unregister_kretprobe(&rp);
-    printk(KERN_INFO "filter_maps: unloaded, total filtered=%lld\n",
+    printk(KERN_INFO "filter_maps: unloaded, total=%lld\n",
            atomic64_read(&nr_filtered));
 }
 
