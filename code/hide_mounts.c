@@ -6,26 +6,22 @@
 MODULE_LICENSE("GPL");
 
 static atomic64_t nr_filtered = ATOMIC64_INIT(0);
+static struct kretprobe rp_show;
 
 struct show_data {
     struct seq_file *m;
     size_t old_count;
 };
 
-static unsigned long (*klp)(const char *);
+/* 用 kprobe 探测 show 函数地址 */
+static unsigned long show_addr;
+static int found;
 
-static int kls_cb(struct kprobe *p, struct pt_regs *r)
+static int probe_cb(struct kprobe *p, struct pt_regs *r)
 {
-    klp = (void *)p->addr;
+    found = 1;
     return 0;
 }
-
-static struct kprobe kp_kls = {
-    .symbol_name = "kallsyms_lookup_name",
-    .pre_handler = kls_cb,
-};
-
-static struct kretprobe rp_show;
 
 static int show_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
@@ -54,34 +50,34 @@ static int show_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 static int __init init_mod(void)
 {
-    unsigned long addr;
+    struct kprobe kp;
     char *names[] = {"mounts_show", "show_mount", NULL};
     int i, ret;
 
-    klp = NULL;
-    ret = register_kprobe(&kp_kls);
-    if (ret < 0 || !klp) {
-        printk(KERN_ERR "hm: can't get kallsyms_lookup_name\n");
-        return -ENOENT;
-    }
-    unregister_kprobe(&kp_kls);
+    show_addr = 0;
 
-    addr = 0;
     for (i = 0; names[i]; i++) {
-        addr = klp(names[i]);
-        if (addr) {
-            printk(KERN_INFO "hm: found %s at 0x%lx\n", names[i], addr);
+        memset(&kp, 0, sizeof(kp));
+        kp.symbol_name = names[i];
+        kp.pre_handler = probe_cb;
+        found = 0;
+
+        ret = register_kprobe(&kp);
+        if (ret == 0) {
+            show_addr = (unsigned long)kp.addr;
+            unregister_kprobe(&kp);
+            printk(KERN_INFO "hm: found %s at 0x%lx\n", names[i], show_addr);
             break;
         }
     }
 
-    if (!addr) {
+    if (!show_addr) {
         printk(KERN_ERR "hm: no show function found\n");
         return -ENOENT;
     }
 
     memset(&rp_show, 0, sizeof(rp_show));
-    rp_show.kp.addr = (kprobe_opcode_t *)addr;
+    rp_show.kp.addr = (kprobe_opcode_t *)show_addr;
     rp_show.entry_handler = show_entry;
     rp_show.handler = show_ret;
     rp_show.data_size = sizeof(struct show_data);
@@ -89,7 +85,7 @@ static int __init init_mod(void)
 
     ret = register_kretprobe(&rp_show);
     if (ret < 0) {
-        printk(KERN_ERR "hm: show kretprobe failed: %d\n", ret);
+        printk(KERN_ERR "hm: kretprobe failed: %d\n", ret);
         return ret;
     }
 
