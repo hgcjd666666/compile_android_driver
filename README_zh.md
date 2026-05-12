@@ -1,256 +1,84 @@
-# kade —— 基于 lyenv 的 Android 内核驱动自动化构建
+# compile_android_driver
 
-**其他语言版本: [English](README.md), [中文](README_zh.md).**
+一键构建 Android 内核驱动模块（.ko），支持多 KMI 版本。
 
-kade 是一个构建在 **lyenv** 之上的 Android 内核驱动自动化框架，
-用于统一、可复现地完成 **GKI / non-GKI** 内核的构建、ABI 处理和产物导出。
+## 使用方法
 
-该仓库通常配合以下项目使用：
+### 1. 将你的驱动源码放入 `code/` 目录
 
-- **lyenv**：https://github.com/systemnb/lyenv
-- **kade 插件**: https://github.com/systemnb/lyenv-plugin-center
+```
+code/
+├── Makefile         # 标准内核外部模块 Makefile
+├── your_driver.c    # 驱动源码
+└── ...
+```
 
----
+Makefile 需遵循标准 Linux 内核外部模块格式：
 
-## 特性
+```makefile
+obj-m += your_driver.o
 
-- ✅ 支持 GKI / non-GKI 内核
-- ✅ 单一配置文件（kadeflow.yaml）
-- ✅ 原生支持 GitHub Actions
-- ✅ 支持外置驱动 / in-tree 驱动
-- ✅ 自动处理 ABI 上游与 ABI 列表
-- ✅ 自动导出构建产物
-- ✅ 支持构建后扩展命令
+all:
+    $(MAKE) -C $(KDIR) M=$(PWD) modules
 
----
+clean:
+    $(MAKE) -C $(KDIR) M=$(PWD) clean
+```
 
-## 推荐仓库结构
+### 2. Push 到 GitHub，自动构建
 
-```text
+往 `main`/`master` 分支推送 `code/` 下的变更后，GitHub Actions 会自动触发矩阵构建：
+
+| KMI | Android 版本 | 内核版本 |
+|---|---|---|
+| `android12-5.10` | Android 12 | 5.10 |
+| `android13-5.10` | Android 13 | 5.10 |
+| `android13-5.15` | Android 13 | 5.15 |
+| `android14-5.15` | Android 14 | 5.15 |
+| `android14-6.1` | Android 14 | 6.1 |
+| `android15-6.6` | Android 15 | 6.6 |
+| `android16-6.12` | Android 16 | 6.12 |
+
+构建产物会自动命名为 `<kmi>_<模块名>.ko`，如 `android14-6.1_your_driver.ko`，并上传为 Actions Artifact。
+
+### 3. 手动触发
+
+在 GitHub 仓库页面 → Actions → **Build LKM for Multiple KMI** → **Run workflow**，即可手动触发构建。
+
+### 4. 下载产物
+
+构建完成后，进入对应的 Action 运行记录，在 **Artifacts** 区域下载：
+- 各 KMI 独立的 `.ko` 文件（按 KMI 版本分类）
+- `all-modules` — 所有 KMI 的 `.ko` 打包为 ZIP
+
+## 工作原理
+
+利用 [ddk-min](https://github.com/ylarod/ddk-min) Docker 容器（预置对应版本的 GKI 内核源码和 LLVM/Clang 工具链），在内核源码树外通过标准 `make -C $(KDIR) M=$(PWD) modules` 机制编译内核模块。
+
+## 目录结构
+
+```
 .
-├── code/                     # 驱动源码目录（推荐）
-│   ├── Makefile
-│   ├── mydriver.c
-│   └── Kconfig               # 可选
-│
-├── abi.symbols               # ABI 符号定义（推荐）
-├── kadeflow.yaml             # 自动化主配置文件
-│
-├── .github/
-│   └── workflows/
-│       └── kade.yml
-│
+├── code/                     # 驱动源码目录（放你的 .c / Makefile）
+├── .github/workflows/
+│   ├── build-lkm.yml         # 矩阵构建入口（push / PR / 手动触发）
+│   └── ddk-lkm.yml           # 实际构建逻辑（可被复用）
 ├── README.md
 └── README_zh.md
 ```
 
----
+## 本地构建
 
-## 驱动源码目录说明
-
-当使用 **外置驱动** 时，kade 会将仓库中的某一个目录
-视为驱动源码目录。
-
-### 推荐约定
-
-```
-code/
-```
-
-配置方式：
-
-```yaml
-gki:
-  driver:
-    in_tree: false
-    external_src_dir: "${GITHUB_WORKSPACE}/code"
-```
-
-kade 只会复制该目录，其它文件不会进入内核源码树。
-
----
-
-## ABI 符号的提供方式（强烈推荐）
-
-ABI 是接口契约，应该作为仓库内容进行管理。
-
-### 推荐方式：仓库文件
-
-创建文件：
-
-```text
-abi.symbols
-```
-
-示例内容：
-
-```text
-register_kprobe
-unregister_kprobe
-kallsyms_lookup_name
-```
-
-在 `kadeflow.yaml` 中引用：
-
-```yaml
-abi:
-  upstream_patch: true
-  symbols_file: "${GITHUB_WORKSPACE}/abi.symbols"
-```
-
-构建前将自动执行：
+使用同样的 DDK 容器在本地编译：
 
 ```bash
-kade abi_upstream
-kade abi --file abi.symbols
+# 以 android14-6.1 为例
+docker run --rm -it -v $(pwd)/code:/workspace/module ghcr.io/ylarod/ddk-min:android14-6.1-20260313 bash -c "cd /workspace/module && make"
 ```
 
----
-
-## kadeflow.yaml（核心配置）
-
-`kadeflow.yaml` 是 CI 与本地构建的唯一配置入口。
-
----
-
-## GKI 配置示例
-
-```yaml
-kade:
-  config_overrides:
-    kernel:
-      flavor: "gki"
-
-    gki:
-      android_version: 13
-      kernel_version: "5.15"
-      target_arch: "aarch64"
-
-      driver:
-        project_name: "mydriver"
-        in_tree: false
-        external_src_dir: "${GITHUB_WORKSPACE}/code"
-        module_name: "mydriver.ko"
-```
-
----
-
-## non-GKI 配置说明
-
-启用 non-GKI：
-
-```yaml
-kernel:
-  flavor: "non_gki"
-```
-
-### 源码来源（non_gki.source）
-
-```yaml
-non_gki:
-  source:
-    type: "repo"     # repo | local | zip
-```
-
-ZIP 示例：
-
-```yaml
-non_gki:
-  source:
-    type: "zip"
-    zip_path: "${GITHUB_WORKSPACE}/kernel.zip"
-    zip_strip_root: true
-```
-
----
-
-### 构建方式（non_gki.build）
-
-#### script 模式（推荐）
-
-```yaml
-non_gki:
-  build:
-    mode: "script"
-    script: "build.sh"
-    artifacts_dir: "out"
-```
-
-#### make 模式（可选）
-
-```yaml
-non_gki:
-  build:
-    mode: "make"
-    make:
-      defconfig: "vendor_defconfig"
-      kernel_series: "4.9_plus"
-      toolchain_path_prefix: "/root/toolchain/clang/bin:/root/toolchain/gcc32/bin:/root/toolchain/gcc64/bin"
-```
-
----
-
-## non-GKI compile_commands
-
-non-GKI 不使用 Bazel。
-
-kade 执行：
+或者直接用本地内核源码树：
 
 ```bash
-python3 gen_compile_commands.py -d <out_dir>
+cd code
+make KDIR=/path/to/your/kernel/src
 ```
-
-可通过配置指定目录：
-
-```yaml
-compile_commands:
-  non_gki_out_dir: "out/android13-5.15/common"
-```
-
----
-
-## 默认 CI 行为
-
-GitHub Actions 默认执行：
-
-   - `kade prepare`
-   - `kade deps`
-   - `kade sync`
-   - `kade abi_upstream`
-   - `kade abi` （若提供 symbols）
-   - `kade build`
-   - `kade export`
-   - `上传构建产物`
-
-执行：
-
-```bash
-eval "$(lyenv activate)"
-```
-
-后，可在任意目录直接使用 `kade`。
-
----
-
-## 环境变量说明
-
-`kadeflow.yaml` 中的路径支持：
-
-- `${GITHUB_WORKSPACE}`
-- `${LYENV_HOME}`
-
-在 CI 中会自动展开。
-
----
-
-## 许可证
-
-- 目录 `code` 下所有文件为 [GPL-2.0-only](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)。
-- 除 `code` 目录的其他部分均为 [Apache License 2.0](LICENSE)。
-
----
-
-## 相关项目
-
-- lyenv：https://github.com/systemnb/lyenv
-- lyenv-plugin-center: https://github.com/systemnb/lyenv-plugin-center

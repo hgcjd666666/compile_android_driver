@@ -8,17 +8,17 @@ on:
         required: true
         type: string
       ddk_release:
-        description: 'DDK release version (used to select container tag)'
+        description: 'DDK release version'
         required: false
-        default: '20251104'
+        default: '20260313'
         type: string
       source_dir:
-        description: 'Directory containing module source and Makefile (relative to repo root)'
+        description: 'Directory containing module source (relative to repo root)'
         required: false
         default: 'code'
         type: string
       module_name:
-        description: 'Explicit module name (if empty, will be parsed from Makefile)'
+        description: 'Explicit module name (auto-detected from Makefile if empty)'
         required: false
         type: string
 
@@ -27,59 +27,60 @@ jobs:
     name: Build for ${{ inputs.kmi }}
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ylarod/ddk:${{ inputs.kmi }}-${{ inputs.ddk_release }}
+      image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
       options: --privileged
+
+    outputs:
+      module_name: ${{ steps.get_modname.outputs.module_name }}
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Prepare module source inside container
+      - name: Prepare module source
         run: |
-          # 将源码目录复制到容器内的构建目录
           mkdir -p /workspace/module
           cp -r "$GITHUB_WORKSPACE/${{ inputs.source_dir }}"/* /workspace/module/
-          # 设置安全目录（避免 git 权限问题）
           git config --global --add safe.directory /workspace/module
 
-      - name: Determine module name (if not provided)
+      - name: Determine module name
         id: get_modname
         run: |
           if [ -n "${{ inputs.module_name }}" ]; then
-            echo "MODULE_NAME=${{ inputs.module_name }}" >> $GITHUB_ENV
+            echo "module_name=${{ inputs.module_name }}" >> $GITHUB_OUTPUT
           else
-            # 从 Makefile 中提取 obj-m 指定的模块名（取第一个）
             cd /workspace/module
-            MODULE=$(grep -E '^obj-m\s*\+?=' Makefile | head -1 | sed -E 's/.*=\s*([^ ]+).*/\1/' | sed 's/\.o$//')
+            MODULE=$(grep -E '^obj-m\s*\+?=' Makefile | head -1 | sed -E 's/.*=\s*([^ ]+)\.o/\1/' | sed 's/.*=\s*//')
             if [ -z "$MODULE" ]; then
               echo "Error: Could not parse module name from Makefile" >&2
               exit 1
             fi
-            echo "MODULE_NAME=$MODULE" >> $GITHUB_ENV
+            echo "module_name=$MODULE" >> $GITHUB_OUTPUT
           fi
 
       - name: Build kernel module
         run: |
+          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           cd /workspace/module
           echo "=== Building $MODULE_NAME.ko for KMI: ${{ inputs.kmi }} ==="
-          # 使用容器内预设的环境变量（如 CC、ARCH 等）进行编译
           make
           echo "=== Build completed ==="
-
-          # 检查模块是否生成
           if [ ! -f "$MODULE_NAME.ko" ]; then
             echo "Error: $MODULE_NAME.ko not found!" >&2
+            ls -la
             exit 1
           fi
 
-      - name: Strip debug symbols (optional)
+      - name: Strip debug symbols
         run: |
+          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           cd /workspace/module
           llvm-strip -d "$MODULE_NAME.ko"
           echo "Stripped size: $(du -h "$MODULE_NAME.ko" | cut -f1)"
 
       - name: Copy and rename artifact
         run: |
+          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           mkdir -p "$GITHUB_WORKSPACE/out"
           OUTPUT_NAME="${{ inputs.kmi }}_${MODULE_NAME}.ko"
           cp "/workspace/module/${MODULE_NAME}.ko" "$GITHUB_WORKSPACE/out/$OUTPUT_NAME"
@@ -88,5 +89,5 @@ jobs:
       - name: Upload module artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kmi }}-${{ env.MODULE_NAME }}.ko
-          path: ${{ github.workspace }}/out/${{ inputs.kmi }}_${{ env.MODULE_NAME }}.ko
+          name: ${{ inputs.kmi }}-${{ steps.get_modname.outputs.module_name }}.ko
+          path: ${{ github.workspace }}/out/${{ inputs.kmi }}_${{ steps.get_modname.outputs.module_name }}.ko
