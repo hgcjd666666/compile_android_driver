@@ -1,13 +1,7 @@
-obj-m += NoCheckHook.o
-
-
-ifneq ($(KDIR),)
-$(info -- KDIR: $(KDIR))
-$(info -- MDIR: $(MDIR))
-endif
+obj-m += filter_maps.o
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
-	$(MAKE) -C $(PWD) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
