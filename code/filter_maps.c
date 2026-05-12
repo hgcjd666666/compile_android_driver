@@ -29,7 +29,7 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     if (copied <= 0 || !file || !file->f_path.dentry)
         return 0;
 
-    if (strcmp(file->f_path.dentry->d_name.name, "maps") != 0)
+    if (strcmp(file->f_path.dentry->d_name.name, "mounts") != 0)
         return 0;
 
     m = (struct seq_file *)READ_ONCE(file->private_data);
