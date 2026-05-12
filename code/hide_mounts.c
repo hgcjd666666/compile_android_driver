@@ -8,6 +8,8 @@
 
 MODULE_LICENSE("GPL");
 
+static atomic64_t nr_calls = ATOMIC64_INIT(0);
+static atomic64_t nr_mounts = ATOMIC64_INIT(0);
 static atomic64_t nr_filtered = ATOMIC64_INIT(0);
 
 static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -24,6 +26,9 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     ssize_t copied = (ssize_t)regs->regs[0];
     char *buf, *src, *dst;
     int filtered;
+    const unsigned char *name;
+
+    atomic64_inc(&nr_calls);
 
     if (copied <= 0 || !iocb)
         return 0;
@@ -32,12 +37,20 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     if (!file || !file->f_path.dentry)
         return 0;
 
-    if (strcmp(file->f_path.dentry->d_name.name, "mounts") != 0)
+    name = file->f_path.dentry->d_name.name;
+    printk(KERN_INFO "hide_mounts: seq_read_iter called, file=%s\n", name);
+
+    if (strcmp(name, "mounts") != 0)
         return 0;
 
+    atomic64_inc(&nr_mounts);
+
     m = (struct seq_file *)READ_ONCE(file->private_data);
-    if (!m || !m->buf || m->count == 0 || m->count > m->size)
+    if (!m || !m->buf || m->count == 0 || m->count > m->size) {
+        printk(KERN_INFO "hide_mounts: no buf (count=%zu size=%zu)\n",
+               m ? m->count : 0, m ? m->size : 0);
         return 0;
+    }
 
     if (!mutex_trylock(&m->lock))
         return 0;
@@ -75,6 +88,9 @@ static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     }
 
     mutex_unlock(&m->lock);
+
+    printk(KERN_INFO "hide_mounts: mounts read, copied=%zd filtered=%d new_count=%zu\n",
+           copied, filtered, filtered ? (size_t)(dst - buf) : m->count);
     return 0;
 }
 
@@ -93,14 +109,16 @@ static int __init hide_init(void)
         printk(KERN_ERR "hide_mounts: register_kretprobe failed: %d\n", ret);
         return ret;
     }
-    printk(KERN_INFO "hide_mounts: loaded\n");
+    printk(KERN_INFO "hide_mounts: loaded, probing seq_read_iter\n");
     return 0;
 }
 
 static void __exit hide_exit(void)
 {
     unregister_kretprobe(&rp);
-    printk(KERN_INFO "hide_mounts: unloaded, total=%lld\n",
+    printk(KERN_INFO "hide_mounts: unloaded: calls=%lld mounts=%lld filtered=%lld\n",
+           atomic64_read(&nr_calls),
+           atomic64_read(&nr_mounts),
            atomic64_read(&nr_filtered));
 }
 
