@@ -6,16 +6,38 @@ on:
     paths:
       - 'code/**'
       - '.github/workflows/build-lkm.yml'
+      - '.github/workflows/ddk-lkm.yml'
   pull_request:
     branches: [ "main", "master" ]
     paths:
       - 'code/**'
+      - '.github/workflows/build-lkm.yml'
+      - '.github/workflows/ddk-lkm.yml'
   workflow_dispatch:
+    inputs:
+      kmi:
+        description: 'KMI version'
+        required: true
+        default: 'android14-6.1'
+        type: choice
+        options:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+      ddk_release:
+        description: 'DDK release version'
+        required: false
+        default: '20260313'
+        type: string
 
 jobs:
   build:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
-      kmi: 'android14-6.1'
-      ddk_release: '20260313'
+      kmi: ${{ inputs.kmi || 'android14-6.1' }}
+      ddk_release: ${{ inputs.ddk_release || '20260313' }}
       source_dir: 'code'
