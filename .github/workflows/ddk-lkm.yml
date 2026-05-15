@@ -17,10 +17,6 @@ on:
         required: false
         default: 'code'
         type: string
-      module_name:
-        description: 'Explicit module name (auto-detected from Makefile if empty)'
-        required: false
-        type: string
 
 jobs:
   build:
@@ -29,9 +25,6 @@ jobs:
     container:
       image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
       options: --privileged
-
-    outputs:
-      module_name: ${{ steps.get_modname.outputs.module_name }}
 
     steps:
       - name: Checkout source code
@@ -43,51 +36,47 @@ jobs:
           cp -r "$GITHUB_WORKSPACE/${{ inputs.source_dir }}"/* /workspace/module/
           git config --global --add safe.directory /workspace/module
 
-      - name: Determine module name
-        id: get_modname
+      - name: Extract module names
+        id: get_modules
         run: |
-          if [ -n "${{ inputs.module_name }}" ]; then
-            echo "module_name=${{ inputs.module_name }}" >> $GITHUB_OUTPUT
-          else
-            cd /workspace/module
-            MODULE=$(grep -E '^obj-m\s*\+?=' Makefile | head -1 | sed -E 's/.*=\s*([^ ]+)\.o/\1/' | sed 's/.*=\s*//')
-            if [ -z "$MODULE" ]; then
-              echo "Error: Could not parse module name from Makefile" >&2
-              exit 1
-            fi
-            echo "module_name=$MODULE" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build kernel module
-        run: |
-          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           cd /workspace/module
-          echo "=== Building $MODULE_NAME.ko for KMI: ${{ inputs.kmi }} ==="
-          make
-          echo "=== Build completed ==="
-          if [ ! -f "$MODULE_NAME.ko" ]; then
-            echo "Error: $MODULE_NAME.ko not found!" >&2
-            ls -la
+          MODULES=$(grep -E '^obj-m\s*\+?=' Makefile | sed -E 's/.*=\s*//; s/\.o//g' | tr '\n' ' ')
+          MODULES=$(echo "$MODULES" | xargs)
+          if [ -z "$MODULES" ]; then
+            echo "Error: No obj-m entries found in Makefile" >&2
             exit 1
           fi
+          echo "modules=$MODULES" >> $GITHUB_OUTPUT
+          echo "Found modules: $MODULES"
 
-      - name: Strip debug symbols
+      - name: Build kernel modules
         run: |
-          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           cd /workspace/module
-          llvm-strip -d "$MODULE_NAME.ko"
-          echo "Stripped size: $(du -h "$MODULE_NAME.ko" | cut -f1)"
+          echo "=== Building all modules for KMI: ${{ inputs.kmi }} ==="
+          make
+          echo "=== Build completed ==="
+          for mod in ${{ steps.get_modules.outputs.modules }}; do
+            if [ ! -f "${mod}.ko" ]; then
+              echo "Error: ${mod}.ko not found!" >&2
+              ls -la
+              exit 1
+            fi
+            echo "OK: ${mod}.ko"
+          done
 
-      - name: Copy and rename artifact
+      - name: Strip and copy artifacts
         run: |
-          MODULE_NAME=${{ steps.get_modname.outputs.module_name }}
           mkdir -p "$GITHUB_WORKSPACE/out"
-          OUTPUT_NAME="${{ inputs.kmi }}_${MODULE_NAME}.ko"
-          cp "/workspace/module/${MODULE_NAME}.ko" "$GITHUB_WORKSPACE/out/$OUTPUT_NAME"
-          echo "Artifact ready: $OUTPUT_NAME"
+          cd /workspace/module
+          for mod in ${{ steps.get_modules.outputs.modules }}; do
+            llvm-strip -d "${mod}.ko"
+            OUTPUT="${{ inputs.kmi }}_${mod}.ko"
+            cp "${mod}.ko" "$GITHUB_WORKSPACE/out/$OUTPUT"
+            echo "Artifact: $OUTPUT ($(du -h "$GITHUB_WORKSPACE/out/$OUTPUT" | cut -f1))"
+          done
 
-      - name: Upload module artifact
+      - name: Upload all module artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kmi }}-${{ steps.get_modname.outputs.module_name }}.ko
-          path: ${{ github.workspace }}/out/${{ inputs.kmi }}_${{ steps.get_modname.outputs.module_name }}.ko
+          name: ${{ inputs.kmi }}-modules
+          path: ${{ github.workspace }}/out/*.ko
