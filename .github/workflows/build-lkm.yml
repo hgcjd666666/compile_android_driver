@@ -38,6 +38,6 @@ jobs:
   build:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
-      kmi: ${{ inputs.kmi || 'android14-6.1' }}
-      ddk_release: ${{ inputs.ddk_release || '20260313' }}
+      kmi: ${{ github.event.inputs.kmi || 'android14-6.1' }}
+      ddk_release: ${{ github.event.inputs.ddk_release || '20260313' }}
       source_dir: 'code'
