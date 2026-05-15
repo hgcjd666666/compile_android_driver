@@ -30,7 +30,6 @@ MODULE_AUTHOR("fshide-lkm");
 #define MAX_HIDE_ENTRIES   128
 #define MAX_PATH_LEN       512
 #define MAX_UID_DIGITS     10
-#define CONFIG_BUF_SIZE    2048
 #define DIRENT64_BUF_SIZE  4096
 
 struct linux_dirent64 {
@@ -51,10 +50,7 @@ struct hide_entry {
 static struct hide_entry hide_list[MAX_HIDE_ENTRIES];
 static int hide_count;
 static DEFINE_MUTEX(hide_lock);
-
-static char config_path[MAX_PATH_LEN] = "/data/adb/fshide";
 static int hide_from_root;
-
 static int misc_registered;
 
 static int find_path_locked(const char *path, uid_t uid, int has_uid)
@@ -136,52 +132,12 @@ static void parse_config_line(const char *line)
 	mutex_unlock(&hide_lock);
 }
 
-static int load_config(void)
+static void clear_all_entries(void)
 {
-	struct file *fp;
-	loff_t pos = 0;
-	char *kbuf;
-	ssize_t nread;
-	const char *p;
-
-	kbuf = kmalloc(CONFIG_BUF_SIZE, GFP_KERNEL);
-	if (!kbuf) return -ENOMEM;
-	memset(kbuf, 0, CONFIG_BUF_SIZE);
-
-	fp = filp_open(config_path, O_RDONLY, 0);
-	if (IS_ERR(fp)) {
-		DBG("load_config: cannot open %s (err=%ld)", config_path, PTR_ERR(fp));
-		kfree(kbuf);
-		return -EIO;
-	}
-
-	nread = kernel_read(fp, kbuf, CONFIG_BUF_SIZE - 1, &pos);
-	filp_close(fp, NULL);
-	if (nread <= 0) {
-		DBG("load_config: read failed or empty (%zd)", nread);
-		kfree(kbuf);
-		return -EIO;
-	}
-	kbuf[nread] = '\0';
-
 	mutex_lock(&hide_lock);
 	memset(hide_list, 0, sizeof(hide_list));
 	hide_count = 0;
 	mutex_unlock(&hide_lock);
-
-	p = kbuf;
-	while (*p) {
-		const char *line_end = p;
-		while (*line_end && *line_end != '\n' && *line_end != '\r')
-			line_end++;
-		parse_config_line(p);
-		p = (*line_end == '\0') ? line_end : line_end + 1;
-		while ((*p == '\n' || *p == '\r') && *p) p++;
-	}
-
-	DBG("load_config: loaded %d entries from '%s' (%zd bytes)", hide_count, config_path, nread);
-	kfree(kbuf);
-	return 0;
 }
 
 static int match_hide_path(const char *path, uid_t uid)
@@ -313,11 +269,8 @@ static int openat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *r
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
-	if (ret > 0) {
-		data->path[ret] = '\0';
-	} else {
-		data->path[0] = '\0';
-	}
+	if (ret > 0) data->path[ret] = '\0';
+	else data->path[0] = '\0';
 	return 0;
 }
 
@@ -339,11 +292,8 @@ static int faccessat_entry_handler(struct kretprobe_instance *ri, struct pt_regs
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
-	if (ret > 0) {
-		data->path[ret] = '\0';
-	} else {
-		data->path[0] = '\0';
-	}
+	if (ret > 0) data->path[ret] = '\0';
+	else data->path[0] = '\0';
 	return 0;
 }
 
@@ -365,11 +315,8 @@ static int newfstatat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
-	if (ret > 0) {
-		data->path[ret] = '\0';
-	} else {
-		data->path[0] = '\0';
-	}
+	if (ret > 0) data->path[ret] = '\0';
+	else data->path[0] = '\0';
 	return 0;
 }
 
@@ -391,11 +338,8 @@ static int chdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *re
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[0], sizeof(data->path) - 1);
-	if (ret > 0) {
-		data->path[ret] = '\0';
-	} else {
-		data->path[0] = '\0';
-	}
+	if (ret > 0) data->path[ret] = '\0';
+	else data->path[0] = '\0';
 	return 0;
 }
 
@@ -495,12 +439,10 @@ static struct kretprobe *all_krps[] = {
 static int register_all_hooks(void)
 {
 	int i, ret;
-
 	for (i = 0; i < KRPOOL_COUNT; i++) {
 		ret = register_kretprobe(all_krps[i]);
 		if (ret < 0) {
-			DBG("register_kretprobe(%s) FAILED err=%d",
-			    all_krps[i]->kp.symbol_name, ret);
+			DBG("register_kretprobe(%s) FAILED err=%d", all_krps[i]->kp.symbol_name, ret);
 			goto fail;
 		}
 		DBG("registered kretprobe on %s", all_krps[i]->kp.symbol_name);
@@ -517,7 +459,6 @@ static void unregister_all_hooks(void)
 	int i;
 	for (i = KRPOOL_COUNT - 1; i >= 0; i--)
 		unregister_kretprobe(all_krps[i]);
-	DBG("all kretprobes unregistered");
 }
 
 static ssize_t fshide_read(struct file *file, char __user *ubuf,
@@ -530,8 +471,8 @@ static ssize_t fshide_read(struct file *file, char __user *ubuf,
 	if (!buf) return -ENOMEM;
 
 	pos += scnprintf(buf + pos, PAGE_SIZE - pos,
-	                 "config=%s\nentries=%d\nhide_root=%d\n",
-	                 config_path, hide_count, hide_from_root);
+	                 "entries=%d\nhide_root=%d\n",
+	                 hide_count, hide_from_root);
 
 	mutex_lock(&hide_lock);
 	for (i = 0; i < hide_count && pos < PAGE_SIZE - 128; i++) {
@@ -544,15 +485,9 @@ static ssize_t fshide_read(struct file *file, char __user *ubuf,
 	}
 	mutex_unlock(&hide_lock);
 
-	if (*ppos >= pos) {
-		kfree(buf);
-		return 0;
-	}
+	if (*ppos >= pos) { kfree(buf); return 0; }
 	ret = min((size_t)(pos - *ppos), len);
-	if (copy_to_user(ubuf, buf + *ppos, ret)) {
-		kfree(buf);
-		return -EFAULT;
-	}
+	if (copy_to_user(ubuf, buf + *ppos, ret)) { kfree(buf); return -EFAULT; }
 	*ppos += ret;
 	kfree(buf);
 	return ret;
@@ -561,47 +496,48 @@ static ssize_t fshide_read(struct file *file, char __user *ubuf,
 static ssize_t fshide_write(struct file *file, const char __user *ubuf,
                             size_t len, loff_t *ppos)
 {
-	char buf[256];
-	char cmd[64], val[192];
+	char *buf;
+	const char *p, *line_end;
 
-	if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-	if (copy_from_user(buf, ubuf, len)) return -EFAULT;
+	if (len > PAGE_SIZE) len = PAGE_SIZE;
+	buf = kmalloc(len + 1, GFP_KERNEL);
+	if (!buf) return -ENOMEM;
+	if (copy_from_user(buf, ubuf, len)) { kfree(buf); return -EFAULT; }
 	buf[len] = '\0';
-	if (len > 0 && buf[len - 1] == '\n') buf[--len] = '\0';
 
-	if (sscanf(buf, "%63s %191s", cmd, val) < 1) {
-		pr_info("[fshide] cmds: config <path> | reload | hide_root <0/1>\n");
-		return len;
-	}
+	p = buf;
+	while (*p) {
+		char line[512];
+		int llen;
+		while (*p == '\n' || *p == '\r') { p++; continue; }
+		if (!*p) break;
+		line_end = p;
+		while (*line_end && *line_end != '\n' && *line_end != '\r') line_end++;
+		llen = (int)(line_end - p);
+		if (llen >= (int)sizeof(line)) llen = sizeof(line) - 1;
+		memcpy(line, p, llen);
+		line[llen] = '\0';
+		p = line_end;
 
-	if (!strcmp(cmd, "config")) {
-		if (val[0] == '/') {
-			strncpy(config_path, val, sizeof(config_path) - 1);
-			config_path[sizeof(config_path) - 1] = '\0';
-			pr_info("[fshide] config path set to '%s'\n", config_path);
+		if (line[0] == '/') {
+			parse_config_line(line);
+		} else if (!strcmp(line, "clear")) {
+			clear_all_entries();
+			pr_info("[fshide] cleared all entries\n");
+		} else if (!strncmp(line, "hide_root", 9)) {
+			const char *v = line + 9;
+			while (*v == ' ' || *v == '\t') v++;
+			hide_from_root = (*v == '1');
+			pr_info("[fshide] hide_root=%d\n", hide_from_root);
 		}
-	} else if (!strcmp(cmd, "reload")) {
-		load_config();
-		pr_info("[fshide] reloaded %d entries from '%s'\n", hide_count, config_path);
-	} else if (!strcmp(cmd, "hide_root")) {
-		hide_from_root = (!strcmp(val, "1") || !strcmp(val, "yes") || !strcmp(val, "true")) ? 1 : 0;
-		pr_info("[fshide] hide_root=%d\n", hide_from_root);
-	} else {
-		pr_info("[fshide] unknown cmd: %s\n", cmd);
 	}
 
+	kfree(buf);
 	return len;
 }
 
-static int fshide_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-static int fshide_release(struct inode *inode, struct file *file)
-{
-	return 0;
-}
+static int fshide_open(struct inode *inode, struct file *file) { return 0; }
+static int fshide_release(struct inode *inode, struct file *file) { return 0; }
 
 static const struct file_operations fshide_fops = {
 	.owner   = THIS_MODULE,
@@ -621,10 +557,7 @@ static struct miscdevice fshide_misc = {
 static int __init fshide_init(void)
 {
 	int ret;
-
 	pr_info("[fshide] loading v0.2.0-lkm\n");
-
-	load_config();
 
 	ret = register_all_hooks();
 	if (ret < 0) {
@@ -640,23 +573,15 @@ static int __init fshide_init(void)
 	}
 	misc_registered = 1;
 
-	pr_info("[fshide] loaded (entries=%d hide_root=%d config=%s)\n",
-	        hide_count, hide_from_root, config_path);
+	pr_info("[fshide] loaded (hide_root=%d)\n", hide_from_root);
 	return 0;
 }
 
 static void __exit fshide_exit(void)
 {
-	if (misc_registered)
-		misc_deregister(&fshide_misc);
-
+	if (misc_registered) misc_deregister(&fshide_misc);
 	unregister_all_hooks();
-
-	mutex_lock(&hide_lock);
-	memset(hide_list, 0, sizeof(hide_list));
-	hide_count = 0;
-	mutex_unlock(&hide_lock);
-
+	clear_all_entries();
 	pr_info("[fshide] unloaded\n");
 }
 
