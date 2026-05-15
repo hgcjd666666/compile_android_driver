@@ -238,7 +238,7 @@ struct hook_data {
 
 static int getdents_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_data *data = ri->data;
+	struct hook_data *data = (struct hook_data *)ri->data;
 	int fd;
 
 	data->has_path = 0;
@@ -253,7 +253,7 @@ static int getdents_entry_handler(struct kretprobe_instance *ri, struct pt_regs 
 
 static int getdents_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_data *data = ri->data;
+	struct hook_data *data = (struct hook_data *)ri->data;
 	long total = regs->regs[0];
 	char *kbuf;
 	long pos, new_total;
@@ -310,7 +310,7 @@ struct hook_entry_data {
 
 static int openat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
 	if (ret > 0) {
@@ -323,7 +323,7 @@ static int openat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *r
 
 static int openat_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	uid_t uid;
 	if (!data->path[0]) return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -336,7 +336,7 @@ static int openat_ret_handler(struct kretprobe_instance *ri, struct pt_regs *reg
 
 static int faccessat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
 	if (ret > 0) {
@@ -349,7 +349,7 @@ static int faccessat_entry_handler(struct kretprobe_instance *ri, struct pt_regs
 
 static int faccessat_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	uid_t uid;
 	if (!data->path[0]) return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -362,7 +362,7 @@ static int faccessat_ret_handler(struct kretprobe_instance *ri, struct pt_regs *
 
 static int newfstatat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[1], sizeof(data->path) - 1);
 	if (ret > 0) {
@@ -375,7 +375,7 @@ static int newfstatat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
 
 static int newfstatat_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	uid_t uid;
 	if (!data->path[0]) return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -388,7 +388,7 @@ static int newfstatat_ret_handler(struct kretprobe_instance *ri, struct pt_regs 
 
 static int chdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
 	ret = strncpy_from_user(data->path, (const char __user *)regs->regs[0], sizeof(data->path) - 1);
 	if (ret > 0) {
@@ -401,7 +401,7 @@ static int chdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *re
 
 static int chdir_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	uid_t uid;
 	if (!data->path[0]) return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
@@ -414,7 +414,7 @@ static int chdir_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs
 
 static int fchdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	int fd = (int)regs->regs[0];
 	if (resolve_fd_path(fd, data->path, sizeof(data->path)) > 0) {
 		DBG("fchdir: fd=%d path='%s' uid=%d", fd, data->path,
@@ -427,7 +427,7 @@ static int fchdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *r
 
 static int fchdir_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	struct hook_entry_data *data = ri->data;
+	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	uid_t uid;
 	if (!data->path[0]) return 0;
 	uid = from_kuid(&init_user_ns, current_uid());
