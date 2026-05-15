@@ -206,7 +206,7 @@ static int resolve_fd_path(int fd, char *buf, int buflen)
 	struct file *file;
 	char *path_ptr, *page;
 
-	file = fget_task(current, fd);
+	file = fget(fd);
 	if (!file) return -EBADF;
 
 	page = (char *)__get_free_page(GFP_KERNEL);
