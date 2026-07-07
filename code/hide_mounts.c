@@ -1,10 +1,11 @@
 // hide_mounts.c
 //
-// 内核模块：隐藏 /proc/self/mounts 中以 "KSU " 开头的挂载行
-// 方法：kretprobe 劫持 seq_read_iter，在读挂载文件前临时替换 show 函数，
+// 内核模块：隐藏 /proc/self/mounts 中的 "KSU " 开头行，
+//           及 /proc/self/mountinfo 中包含 " KSU " 的挂载行
+// 方法：kretprobe 劫持 seq_read_iter，在读文件前临时替换 show 函数，
 //       在数据生成点逐行过滤，首读即隐藏，无需修改 seq_read_iter 状态机。
 //
-// 作者：hgcjd666666（划掉）DeepSeek
+// 作者：hgcjd666666
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -16,34 +17,24 @@
 #include <linux/dcache.h>
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Hide KSU mounts from /proc/self/mounts by on-the-fly show replacement");
-// MODULE_AUTHOR("hgcjd666666");
-MODULE_AUTHOR("deepseek-v4-pro");
+MODULE_DESCRIPTION("Hide KSU mount lines from mounts and mountinfo by on-the-fly show replacement");
+MODULE_AUTHOR("hgcjd666666");
 
 /* ---------- 过滤层：替换后的 show 函数 ---------- */
 
-/* 保存挂载文件原始 show 函数指针，由钩子入口处动态获取 */
+/* 保存 mounts 和 mountinfo 各自的原始 show 函数指针，由钩子入口处动态获取 */
 static int (*original_mounts_show)(struct seq_file *seq, void *v) = NULL;
-
+static int (*original_mountinfo_show)(struct seq_file *seq, void *v) = NULL;
 /**
- * filtered_mounts_show - 自定义 show 函数，用于替换原 seq_operations->show
- * @seq: 序列文件指针
- * @v:   传递给 show 的迭代器参数（实际未使用）
+ * filtered_mounts_show - mounts 的过滤 show：丢弃以 "KSU " 开头的行
  *
- * 工作原理：
- * 1. 分配临时缓冲区，将 m->buf 临时替换为临时缓冲区，保留原缓冲区指针和大小。
- * 2. 调用原始 show 函数，让它把一行数据输出到临时缓冲区。
- * 3. 检查输出内容是否以 "KSU " 开头：
- *    - 若是，直接丢弃该行（不写入原缓冲区）。
- *    - 否则将这一行拷贝到原缓冲区的已有内容之后。
- * 4. 恢复原 m->buf，释放临时缓冲区。
- *
- * 注意：每次调用只处理一行（show 每行调用一次），因此不需要遍历换行符。
+ * 优化思路（暂未实现）：
+ * 当前方案是写入临时缓冲区再 memcpy，可以改为直接写入原始缓冲区，
+ * 然后检查 saved_count 处是否为 'K'→'S'→'U'→' '，是则回退 count 丢弃。
  */
 static int filtered_mounts_show(struct seq_file *seq, void *v)
 {
-    char *temp_buf;           // 临时缓冲区，用于承载原始 show 的输出
-    size_t bytes_written;     // 原始 show 实际写入临时缓冲区的字节数
+    char *temp_buf;           // 临时缓冲区，用于承载原始 show 的输出    size_t bytes_written;     // 原始 show 实际写入临时缓冲区的字节数
     char *saved_buf;          // 保存原 m->buf
     size_t saved_size;        // 保存原 m->size
     size_t saved_count;       // 保存原 m->count
@@ -99,15 +90,71 @@ static int filtered_mounts_show(struct seq_file *seq, void *v)
     kfree(temp_buf);
     return ret;
 }
+/**
+ * filtered_mountinfo_show - mountinfo 的过滤 show：丢弃包含 " KSU " 的行
+ *
+ * 优化思路（暂未实现）：
+ * mounts 的优化同样适用于此，但 mountinfo 的特征 " KSU " 在行中间，
+ * 需要在新增内容中逐字节匹配，比行首判断略复杂，且临时缓冲区方案
+ * 在实际测试中性能足够，暂时保持当前实现。
+ */
+static int filtered_mountinfo_show(struct seq_file *seq, void *v)
+{    char *temp_buf;
+    size_t bytes_written;
+    char *saved_buf;
+    size_t saved_size;
+    size_t saved_count;
+    int ret;
+
+    if (!original_mountinfo_show)
+        return 0;
+
+    temp_buf = kmalloc(seq->size, GFP_KERNEL);
+    if (!temp_buf)
+        return original_mountinfo_show(seq, v);
+
+    saved_buf   = seq->buf;
+    saved_size  = seq->size;
+    saved_count = seq->count;
+
+    seq->buf   = temp_buf;
+    seq->count = 0;
+
+    ret = original_mountinfo_show(seq, v);
+    bytes_written = seq->count;
+
+    seq->buf  = saved_buf;
+    seq->size = saved_size;
+
+    if (ret == 0 && bytes_written > 0) {
+        /* mountinfo 中 KSU 出现在行中间，检查 " KSU "（前后空格） */
+        if (strstr(temp_buf, " KSU ") != NULL) {
+            seq->count = saved_count;
+        } else {
+            if (saved_count + bytes_written <= saved_size) {
+                memcpy(saved_buf + saved_count, temp_buf, bytes_written);
+                seq->count = saved_count + bytes_written;
+            } else {
+                seq->count = 0;
+                ret = -ENOSPC;
+            }
+        }
+    } else {
+        seq->count = saved_count;
+    }
+
+    kfree(temp_buf);
+    return ret;
+}
 
 /* ---------- seq_read_iter 钩子：临时替换 show ---------- */
-
 /**
  * struct read_iter_hook_data - 每次 seq_read_iter 钩子的上下文
  * @file:        当前被读取的文件结构体
  * @seq:         文件的 seq_file 私有数据
  * @old_ops:     原始的 seq_operations，需要在读完后恢复
- * @new_ops:     新分配的 seq_operations，其 show 指向 filtered_mounts_show
+ * @new_ops:     新分配的 seq_operations，替换后的 show 函数
+ * @is_mountinfo: true=mountinfo 文件，false=mounts 文件
  * @show_replaced: 标记本次调用中是否已替换 show，用于决定 ret 中是否恢复
  */
 struct read_iter_hook_data {
@@ -115,18 +162,18 @@ struct read_iter_hook_data {
     struct seq_file *seq;
     const struct seq_operations *old_ops;
     struct seq_operations *new_ops;
+    bool is_mountinfo;
     bool show_replaced;
 };
-
 /**
  * hook_seq_read_iter_entry - kretprobe 入口处理函数
  * @ri:   kretprobe 实例
  * @regs: 函数调用时的寄存器快照
  *
  * 在 seq_read_iter 执行前被调用。
- * 检查本次读取是否为 /proc/self/mounts，若是则：
+ * 检查本次读取是否为 mounts 或 mountinfo，若是则：
  * 1. 备份当前的 seq_operations。
- * 2. 分配新的 seq_operations，将 show 替换为 filtered_mounts_show。
+ * 2. 分配新的 seq_operations，根据文件类型替换 show 为对应的过滤版本。
  * 3. 让 seq_file 的 op 指向新 ops。
  * 这样后续调用 show 时将直接执行我们的过滤版本。
  */
@@ -137,8 +184,10 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
     struct kiocb *iocb = (struct kiocb *)regs->regs[0];
     struct file *file   = iocb->ki_filp;
     struct seq_file *seq;
+    const char *fname;
 
     data->file          = file;
+    data->is_mountinfo  = false;
     data->show_replaced = false;
 
     if (!file)
@@ -149,12 +198,19 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
     if (!seq || !seq->op || !file->f_path.dentry)
         return 0;
 
-    /* 只拦截名为 "mounts" 的文件，通常是 /proc/self/mounts 或 /proc/xxx/mounts */
-    if (strcmp(file->f_path.dentry->d_name.name, "mounts") != 0)
+    /* 只拦截 mounts 或 mountinfo 文件 */
+    fname = file->f_path.dentry->d_name.name;
+    if (strcmp(fname, "mounts") == 0) {
+        data->is_mountinfo = false;
+    } else if (strcmp(fname, "mountinfo") == 0) {
+        data->is_mountinfo = true;
+    } else {
         return 0;
+    }
 
-    /* 如果已经被替换（例如并发读取，理论上不会发生，但做防御检查） */
-    if (seq->op->show == filtered_mounts_show)
+    /* 如果已经被替换，做防御检查 */
+    if (seq->op->show == filtered_mounts_show ||
+        seq->op->show == filtered_mountinfo_show)
         return 0;
 
     /* 备份当前 ops，创建新 ops 并替换 show */
@@ -163,20 +219,23 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
     if (!data->new_ops)
         return 0;
 
-    /* 拷贝整个 ops 结构，仅修改 show 字段 */
+    /* 拷贝整个 ops 结构，根据文件类型替换对应的 show */
     memcpy(data->new_ops, data->old_ops, sizeof(*(data->new_ops)));
-    original_mounts_show = data->old_ops->show;   // 记录原始 show，供过滤函数调用
-    data->new_ops->show  = filtered_mounts_show;
+    if (data->is_mountinfo) {
+        original_mountinfo_show = data->old_ops->show;
+        data->new_ops->show = filtered_mountinfo_show;
+        printk(KERN_INFO "hm: replaced show for mountinfo (seq=%p)\n", seq);
+    } else {
+        original_mounts_show = data->old_ops->show;
+        data->new_ops->show = filtered_mounts_show;
+        printk(KERN_INFO "hm: replaced show for mounts (seq=%p)\n", seq);
+    }
     seq->op = data->new_ops;
 
     data->show_replaced = true;
 
-    /* 调试日志：使用 KERN_INFO 确保在普通日志级别可见 */
-    printk(KERN_INFO "hm: replaced show for mounts (seq=%p)\n", seq);
-
     return 0;
 }
-
 /**
  * hook_seq_read_iter_ret - kretprobe 返回处理函数
  * @ri:   kretprobe 实例
@@ -206,7 +265,7 @@ static struct kretprobe kretp_seq_read_iter = {
     .entry_handler = hook_seq_read_iter_entry,
     .handler       = hook_seq_read_iter_ret,
     .data_size     = sizeof(struct read_iter_hook_data),
-    .maxactive     = 64,                  // 最大并发探测实例数，足够使用
+    .maxactive     = 0,                   // 0=内核自动选择，通常为 NR_CPUS 的倍数
     .kp            = {
         .symbol_name = "seq_read_iter",
     },
