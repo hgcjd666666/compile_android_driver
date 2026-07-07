@@ -35,11 +35,11 @@ static int (*original_mountinfo_show)(struct seq_file *seq, void *v) = NULL;
 static int filtered_mounts_show(struct seq_file *seq, void *v)
 {
     char *temp_buf;           // 临时缓冲区，用于承载原始 show 的输出
-    size_t bytes_written;     // 原始 show 实际写入临时缓冲区的字节数    char *saved_buf;          // 保存原 m->buf
+    size_t bytes_written;     // 原始 show 实际写入临时缓冲区的字节数
+    char *saved_buf;          // 保存原 m->buf
     size_t saved_size;        // 保存原 m->size
     size_t saved_count;       // 保存原 m->count
     int ret;
-
     if (!original_mounts_show)
         return 0;
 
