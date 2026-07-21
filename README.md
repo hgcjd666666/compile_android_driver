@@ -1,35 +1,27 @@
 # compile_android_driver
 
-One-click build of Android kernel modules (.ko) for multiple KMI versions.
+一键构建 Android 内核驱动模块（.ko），支持多 KMI 版本。
 
-## Usage
+## 使用方法
 
-### 1. Put your driver source in `code/` directory
+### 1. 将你的驱动源码放入 `code/` 目录：
 
 ```
 code/
-├── Makefile         # Standard kernel external module Makefile
-├── your_driver.c    # Driver source
+├── Makefile         # 标准内核外部模块 Makefile （没事别去改它）
+├── your_driver.c    # 驱动源码
 └── ...
 ```
 
-Makefile should follow the standard Linux kernel external module format:
+### 2. Push 到 GitHub，自动构建：
 
-```makefile
-obj-m += your_driver.o
+push后，Actions 会自动构建android14-6.1的内核
 
-all:
-    $(MAKE) -C $(KDIR) M=$(PWD) modules
+### 3. 手动触发矩阵构建：
 
-clean:
-    $(MAKE) -C $(KDIR) M=$(PWD) clean
-```
+在 GitHub 仓库页面 → Actions → **Build LKM for Multiple KMI** → **Run workflow**，即可手动触发构建。
 
-### 2. Push to GitHub, auto-build
-
-Push changes under `code/` to `main`/`master`, and GitHub Actions will automatically trigger a matrix build:
-
-| KMI | Android | Kernel |
+| KMI | Android 版本 | 内核版本 |
 |---|---|---|
 | `android12-5.10` | Android 12 | 5.10 |
 | `android13-5.10` | Android 13 | 5.10 |
@@ -39,44 +31,38 @@ Push changes under `code/` to `main`/`master`, and GitHub Actions will automatic
 | `android15-6.6` | Android 15 | 6.6 |
 | `android16-6.12` | Android 16 | 6.12 |
 
-Artifacts are named `<kmi>_<module_name>.ko`, e.g. `android14-6.1_your_driver.ko`.
+构建产物会自动命名为 `<kmi>_<模块名>.ko`，如 `android14-6.1_your_driver.ko`，并上传为 Actions Artifact。
 
-### 3. Manual trigger
+### 4. 下载产物：
 
-Go to GitHub → Actions → **Build LKM for Multiple KMI** → **Run workflow**.
+构建完成后，进入对应的 Action 运行记录，在 **Artifacts** 区域下载产物
 
-### 4. Download artifacts
+## 大致原理：
 
-After build completes, download from the **Artifacts** section:
-- Individual `.ko` files per KMI
-- `all-modules` — ZIP archive of all KMIs
+利用 [ddk-min](https://github.com/ylarod/ddk-min) Docker 容器（预置对应版本的 GKI 内核源码和 LLVM/Clang 工具链），在内核源码树外通过标准 `make -C $(KDIR) M=$(PWD) modules` 机制编译内核模块。
 
-## How it works
-
-Uses [ddk-min](https://github.com/ylarod/ddk-min) Docker containers (prebuilt with matching GKI kernel source and LLVM/Clang toolchain) to compile the module via standard `make -C $(KDIR) M=$(PWD) modules`.
-
-## Directory Structure
+## 目录结构：
 
 ```
 .
-├── code/                     # Driver source directory
+├── code/                     # 驱动源码目录（放你的 .c / Makefile）
 ├── .github/workflows/
-│   ├── build-lkm.yml         # Matrix build entry (push / PR / manual)
-│   └── ddk-lkm.yml           # Actual build logic (reusable)
+│   ├── build-lkm.yml         # 矩阵构建入口（push / PR / 手动触发）
+│   └── ddk-lkm.yml           # 实际构建逻辑（可被复用）
 ├── README.md
 └── README_zh.md
 ```
 
-## Local Build
+## 本地构建：
 
-Using the same DDK container locally:
+使用同样的 DDK 容器在本地编译：
 
 ```bash
-# Example for android14-6.1
+# 以 android14-6.1 为例
 docker run --rm -it -v $(pwd)/code:/workspace/module ghcr.io/ylarod/ddk-min:android14-6.1-20260313 bash -c "cd /workspace/module && make"
 ```
 
-Or with a local kernel source tree:
+或者直接用本地内核源码树（真的要这么干吗）：
 
 ```bash
 cd code

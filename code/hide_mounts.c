@@ -1,7 +1,6 @@
 // hide_mounts.c
 //
-// 内核模块：隐藏 /proc/self/mounts 中的 "KSU " 开头行，
-//           及 /proc/self/mountinfo 中包含 " KSU " 的挂载行
+// 内核模块：隐藏 /proc/self/mounts 及 /proc/self/mountinfo 中的一些特征
 // 方法：kretprobe 劫持 seq_read_iter，在读文件前临时替换 show 函数，
 //       在数据生成点逐行过滤，首读即隐藏，无需修改 seq_read_iter 状态机。
 //
@@ -28,7 +27,7 @@ static int (*original_mountinfo_show)(struct seq_file *seq, void *v) = NULL;
 /**
  * filtered_mounts_show - mounts 的过滤 show：丢弃以 "KSU " 开头的行
  *
- * 优化思路（暂未实现）：
+ * 优化思路（懒得改）：
  * 当前方案是写入临时缓冲区再 memcpy，可以改为直接写入原始缓冲区，
  * 然后检查 saved_count 处是否为 'K'→'S'→'U'→' '，是则回退 count 丢弃。
  */
@@ -67,7 +66,7 @@ static int filtered_mounts_show(struct seq_file *seq, void *v)
     seq->size = saved_size;
 
     if (ret == 0 && bytes_written > 0) {
-        /* 检查是否是我们需要隐藏的 KSU 行 */
+        /* 检查是否是需要隐藏的 KSU 行 */
         if (bytes_written >= 4 && memcmp(temp_buf, "KSU ", 4) == 0) {
             /* 匹配 KSU 行，丢弃：直接恢复原 count，相当于没写入任何数据 */
             seq->count = saved_count;
@@ -93,7 +92,7 @@ static int filtered_mounts_show(struct seq_file *seq, void *v)
 /**
  * filtered_mountinfo_show - mountinfo 的过滤 show：丢弃包含 " KSU " 的行
  *
- * 优化思路（暂未实现）：
+ * 优化思路（懒得改）：
  * mounts 的优化同样适用于此，但 mountinfo 的特征 " KSU " 在行中间，
  * 需要在新增内容中逐字节匹配，比行首判断略复杂，且临时缓冲区方案
  * 在实际测试中性能足够，暂时保持当前实现。
@@ -127,8 +126,7 @@ static int filtered_mountinfo_show(struct seq_file *seq, void *v)
     seq->size = saved_size;
 
     if (ret == 0 && bytes_written > 0) {
-        /* mountinfo 中 KSU 出现在行中间，检查 " KSU "（前后空格） */
-        if (strstr(temp_buf, " KSU ") != NULL) {
+        if (strstr(temp_buf, " KSU ") != NULL || strstr(temp_buf, "/adb/modules/") != NULL) {
             seq->count = saved_count;
         } else {
             if (saved_count + bytes_written <= saved_size) {
