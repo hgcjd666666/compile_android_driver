@@ -14,10 +14,22 @@
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/dcache.h>
+#include <linux/sysfs.h>
+#include <linux/ptrace.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Hide KSU mount lines from mounts and mountinfo by on-the-fly show replacement");
 MODULE_AUTHOR("hgcjd666666");
+
+/* ---------- insmod 参数：mountinfo 额外匹配串（逗号分隔） ---------- */
+static char minfo_extra[256] = "";
+module_param_string(minfo_extra, minfo_extra, sizeof(minfo_extra), 0);
+
+/* 模式串数组：minfo_pats[0] 始终为 " KSU "，后续由 minfo_extra 解析而来 */
+#define MAX_PATTERNS 16
+#define PATTERN_LEN_MAX 64
+static char *minfo_pats[MAX_PATTERNS];
+static int minfo_nr_pats;
 
 /* ---------- 过滤层：替换后的 show 函数 ---------- */
 
@@ -126,7 +138,15 @@ static int filtered_mountinfo_show(struct seq_file *seq, void *v)
     seq->size = saved_size;
 
     if (ret == 0 && bytes_written > 0) {
-        if (strstr(temp_buf, " KSU ") != NULL || strstr(temp_buf, "/adb/modules/") != NULL) {
+        bool hide = false;
+        int i;
+        for (i = 0; i < minfo_nr_pats; i++) {
+            if (strstr(temp_buf, minfo_pats[i]) != NULL) {
+                hide = true;
+                break;
+            }
+        }
+        if (hide) {
             seq->count = saved_count;
         } else {
             if (saved_count + bytes_written <= saved_size) {
@@ -178,8 +198,7 @@ struct read_iter_hook_data {
 static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct read_iter_hook_data *data = (struct read_iter_hook_data *)ri->data;
-    /* ARM64 调用约定：x0 = kiocb, x1 = iov_iter */
-    struct kiocb *iocb = (struct kiocb *)regs->regs[0];
+    struct kiocb *iocb = (struct kiocb *)regs_get_kernel_argument(regs, 0);
     struct file *file   = iocb->ki_filp;
     struct seq_file *seq;
     const char *fname;
@@ -270,35 +289,63 @@ static struct kretprobe kretp_seq_read_iter = {
 };
 
 /* ---------- 模块生命周期 ---------- */
-
-/**
- * hide_mounts_init - 模块加载入口
- *
- * 注册 seq_read_iter 的 kretprobe，成功后会在 dmesg 中看到提示。
- */
 static int __init hide_mounts_init(void)
 {
     int ret;
+    char *p, *buf = NULL;
 
+    /* ---- 解析模式串 ---- */
+    minfo_pats[0] = " KSU ";
+    minfo_nr_pats = 1;
+
+    if (minfo_extra[0] != '\0') {
+        buf = kstrndup(minfo_extra, sizeof(minfo_extra) - 1, GFP_KERNEL);
+        if (buf) {
+            while ((p = strsep(&buf, ",")) != NULL && minfo_nr_pats < MAX_PATTERNS) {
+                if (*p == '\0')
+                    continue;
+                if (strlen(p) > PATTERN_LEN_MAX)
+                    continue;
+                minfo_pats[minfo_nr_pats] = kstrdup(p, GFP_KERNEL);
+                if (minfo_pats[minfo_nr_pats])
+                    minfo_nr_pats++;
+            }
+            kfree(buf);
+        }
+    }
+
+    /* ---- 隐藏模块 sysfs 目录 ---- */
+    sysfs_remove_dir(&THIS_MODULE->mkobj.kobj);
+
+    /* ---- 注册 kretprobe ---- */
     ret = register_kretprobe(&kretp_seq_read_iter);
     if (ret < 0) {
         printk(KERN_ERR "hide_mounts: failed to register seq_read_iter kretprobe, error %d\n", ret);
-        return ret;
+        goto err_free_pats;
     }
 
-    printk(KERN_INFO "hide_mounts: successfully loaded (seq_read_iter hook active)\n");
+    printk(KERN_INFO "hide_mounts: loaded (%d mountinfo patterns)\n", minfo_nr_pats);
     return 0;
+
+err_free_pats: {
+        int __i;
+        for (__i = 1; __i < minfo_nr_pats; __i++)
+            kfree(minfo_pats[__i]);
+        minfo_nr_pats = 0;
+        return ret;
+    }
 }
 
-/**
- * hide_mounts_exit - 模块卸载入口
- *
- * 注销 kretprobe。由于该钩子在每次读取后都会恢复 ops，没有残留状态，
- * 因此卸载时不需要额外清理悬挂指针。
- */
 static void __exit hide_mounts_exit(void)
 {
+    int i;
+
     unregister_kretprobe(&kretp_seq_read_iter);
+
+    for (i = 1; i < minfo_nr_pats; i++)
+        kfree(minfo_pats[i]);
+    minfo_nr_pats = 0;
+
     printk(KERN_INFO "hide_mounts: unloaded\n");
 }
 
