@@ -688,7 +688,7 @@ static int __init hide_mounts_init(void)
     kp_open.kp.symbol_name = "mountinfo_open";
     ret = register_kretprobe(&kp_open);
     if (ret < 0) {
-        printk(KERN_ERR "hide_mounts: register proc_mounts_open failed: %d\n", ret);
+        printk(KERN_ERR "hide_mounts: register mountinfo_open failed: %d\n", ret);
         goto err_pats;
     }
 
@@ -699,7 +699,7 @@ static int __init hide_mounts_init(void)
         unregister_kretprobe(&kp_open);
         goto err_pats;
     }
-	printk(KERN_INFO "hide_mounts: loaded (Step 2)\n");
+	printk(KERN_INFO "hide_mounts: loaded\n");
 
 err_pats: {
         int i;
