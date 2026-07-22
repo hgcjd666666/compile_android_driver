@@ -11,11 +11,7 @@
 #include <linux/atomic.h>
 #include <linux/dcache.h>
 #include <linux/ptrace.h>
-#include <linux/mount.h>
-#include <linux/nsproxy.h>
-#include <linux/namei.h>
 #include <linux/err.h>
-#include <linux/namei.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Hide KSU mount traces: master fix + hide");
@@ -96,7 +92,6 @@ struct master_map {
 
 static int (*proc_mounts_open_ptr)(struct inode *, struct file *) = NULL;
 static int (*seq_release_ptr)(struct inode *, struct file *) = NULL;
-static char *(*dentry_path_ptr)(const struct dentry *, char *, int) = NULL;
 
 /* ====== 缓存结构 ====== */
 
@@ -191,74 +186,18 @@ static void add_mapping(struct master_map *map, int original, int corrected)
 /* ====== 构建修正映射表 ====== */
 
 static void ensure_map_built(struct mount_cache *c)
-static void ensure_map_built(struct mount_cache *c)
 {
+    /*
+     * 映射表构建已禁用：struct mount 内部结构在模块中不可见。
+     * 改用 filp_open 读取 /proc/self/mountinfo 来构建映射表。
+     * 此功能将在 Step 4 中实现。
+     */
     if (atomic_read(&c->map_ready))
         return;
-    if (!atomic_cmpxchg(&c->map_ready, 0, -1)) {
-        struct rw_semaphore *ns_sem;
-        struct mnt_namespace *ns;
-        struct mount *mnt;
-        struct list_head *p;
-        int gid, anchor;
-        int master;
-        char path_buf[256];
-
-        ns_sem = (void *)kallsyms_lookup_name("namespace_sem");
-        if (!ns_sem || !dentry_path_ptr)
-            goto done;
-
-        ns = current->nsproxy->mnt_ns;
-        if (!ns) goto done;
-
-        init_group_stats();
-
-        down_read(ns_sem);
-        list_for_each(p, &ns->list) {
-            char *path;
-            mnt = list_entry(p, struct mount, mnt_list);
-
-            path = dentry_path_ptr(mnt->mnt_mountpoint, path_buf, sizeof(path_buf));
-            if (IS_ERR_OR_NULL(path))
-                continue;
-
-            gid = get_group_id(path);
-            if (gid < 0)
-                continue;
-
-            /* 只关心 slave mount 的 master 值 */
-            if (!IS_MNT_SLAVE(mnt))
-                continue;
-
-            master = mnt->mnt_master->mnt_group_id;
-            if (master > 0)
-                record_master(gid, master);
-        }
-        up_read(ns_sem);
-
-        c->map.count = 0;
-        for (gid = 0; gid < MAX_GROUPS; gid++) {
-            anchor = find_anchor(gid);
-            if (anchor > 0) {
-                struct group_stat *gs = &group_stats[gid];
-                int i;
-                for (i = 0; i < gs->count; i++) {
-                    if (gs->master_values[i] != anchor)
-                        add_mapping(&c->map, gs->master_values[i], anchor);
-                }
-            }
-        }
-
-done:
-        atomic_set(&c->map_ready, 1);
-    } else {
-        while (atomic_read(&c->map_ready) == -1)
-            cpu_relax();
-    }
+    atomic_set(&c->map_ready, 1);
 }
 
-/* ====== 缓存操作 ====== */
-
+static struct mount_cache *cache_alloc
 static struct mount_cache *cache_alloc(struct seq_file *seq, struct file *file)
 {
     struct mount_cache *c = kzalloc(sizeof(*c), GFP_KERNEL);
@@ -612,14 +551,9 @@ static int release_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 static int __init resolve_symbols(void)
 {
     proc_mounts_open_ptr = (void *)kallsyms_lookup_name("mountinfo_open");
-tseq_release_ptr = (void *)kallsyms_lookup_name("seq_release");
+    seq_release_ptr = (void *)kallsyms_lookup_name("seq_release");
     if (!proc_mounts_open_ptr)
         proc_mounts_open_ptr = (void *)kallsyms_lookup_name("proc_mounts_open");
-    dentry_path_ptr = (void *)kallsyms_lookup_name("__dentry_path");
-    if (!dentry_path_ptr)
-        dentry_path_ptr = (void *)kallsyms_lookup_name("dentry_path_raw");
-    if (!dentry_path_ptr)
-        dentry_path_ptr = (void *)kallsyms_lookup_name("dentry_path");
     if (proc_mounts_open_ptr && seq_release_ptr)
         return 0;
 }
