@@ -315,7 +315,8 @@ static int __init hide_mounts_init(void)
     }
 
     /* ---- 隐藏模块 sysfs 目录 ---- */
-    sysfs_remove_dir(&THIS_MODULE->mkobj.kobj);
+    // 内核没有导出这个符号
+    // sysfs_remove_dir(&THIS_MODULE->mkobj.kobj);
 
     /* ---- 注册 kretprobe ---- */
     ret = register_kretprobe(&kretp_seq_read_iter);
