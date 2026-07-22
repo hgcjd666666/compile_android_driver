@@ -79,55 +79,59 @@ static bool paths_equal(const char *a, const char *b)
 }
 
 /**
- * is_dup_mount_path - 检查当前行与缓冲区中上一行的挂载点路径是否相同
+ * is_dup_mount_path - 检查当前行挂载点是否在 saved_buf 中已出现过
  * @line:        当前行文本
  * @saved_buf:   已输出的缓冲区
  * @saved_count: 已输出的字节数
  * @is_mountinfo: true=mountinfo格式，false=mounts格式
  *
+ * 遍历 saved_buf 中每一行，提取挂载点路径与当前行比较。
+ * saved_count == 0（尚无已输出行）时返回 false。
  * mounts格式挂载点是第2列，mountinfo是第5列。
- * saved_count == 0（第一行）时返回 false。
  */
 static bool is_dup_mount_path(const char *line, const char *saved_buf,
-                               size_t saved_count, bool is_mountinfo)
+                                size_t saved_count, bool is_mountinfo)
 {
-    const char *p;
-    const char *last_line_start;
     const char *curr_path, *prev_path;
-    int i;
+    const char *p, *line_end;
+    int i, skip_cnt;
 
     if (saved_count == 0)
         return false;
 
-    /* 从 saved_buf 中找最后一个换行符，确定上一行起始位置 */
-    p = saved_buf + saved_count - 1;
-    while (p >= saved_buf && *p != '\n')
-        p--;
-    if (p < saved_buf)
-        return false;
-
-    last_line_start = p + 1;
-
-    /* 根据格式定位挂载点路径 */
-    if (is_mountinfo) {
-        /* mountinfo: ID 父ID 设备号 根 挂载点 ... */
-        curr_path = line;
-        prev_path = last_line_start;
-        for (i = 0; i < 4; i++) {
-            curr_path = skip_field(curr_path);
-            prev_path = skip_field(prev_path);
-            if (!curr_path || !prev_path)
-                return false;
-        }
-    } else {
-        /* mounts: 设备 挂载点 ... */
-        curr_path = skip_field(line);
-        prev_path = skip_field(last_line_start);
-        if (!curr_path || !prev_path)
+    /* 提取当前行的挂载点路径 */
+    skip_cnt = is_mountinfo ? 4 : 1;
+    curr_path = line;
+    for (i = 0; i < skip_cnt; i++) {
+        curr_path = skip_field(curr_path);
+        if (!curr_path)
             return false;
     }
 
-    return paths_equal(curr_path, prev_path);
+    /* 遍历 saved_buf 中每一行，逐一比较挂载点 */
+    p = saved_buf;
+    while (p < saved_buf + saved_count) {
+        /* 找到本行结尾（\\n） */
+        line_end = memchr(p, '\\n', saved_buf + saved_count - p);
+        if (!line_end)
+            break;
+
+        /* 提取该行的挂载点（只在行范围内搜索） */
+        prev_path = p;
+        for (i = 0; i < skip_cnt; i++) {
+            prev_path = skip_field(prev_path);
+            if (!prev_path || prev_path > line_end)
+                goto next_line;
+        }
+
+        if (paths_equal(curr_path, prev_path))
+            return true;
+
+next_line:
+        p = line_end + 1;
+    }
+
+    return false;
 }/**
  * filtered_mounts_show - mounts 的过滤 show：丢弃以 "KSU " 开头的行
  *
