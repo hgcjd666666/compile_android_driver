@@ -112,7 +112,7 @@ static bool is_dup_mount_path(const char *line, const char *saved_buf,
     p = saved_buf;
     while (p < saved_buf + saved_count) {
         /* 找到本行结尾（\\n） */
-        line_end = memchr(p, '\\n', saved_buf + saved_count - p);
+        line_end = memchr(p, '\n', saved_buf + saved_count - p);
         if (!line_end)
             break;
 
