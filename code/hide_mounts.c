@@ -21,16 +21,19 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Hide KSU mount lines from mounts and mountinfo by on-the-fly show replacement");
 MODULE_AUTHOR("hgcjd666666");
 
-/* ---------- insmod 参数：mountinfo 额外匹配串（逗号分隔） ---------- */
+/* ---------- insmod 参数：mounts/mountinfo 额外匹配串（逗号分隔） ---------- */
+static char mounts_extra[256] = "";
+module_param_string(mounts_extra, mounts_extra, sizeof(mounts_extra), 0);
 static char minfo_extra[256] = "";
 module_param_string(minfo_extra, minfo_extra, sizeof(minfo_extra), 0);
 
-/* 模式串数组：minfo_pats[0] 始终为 " KSU "，后续由 minfo_extra 解析而来 */
+/* 模式串数组：pats[0] 为内置默认，后续由 *_extra 解析而来 */
 #define MAX_PATTERNS 16
 #define PATTERN_LEN_MAX 64
+static char *mounts_pats[MAX_PATTERNS];
+static int mounts_nr_pats;
 static char *minfo_pats[MAX_PATTERNS];
 static int minfo_nr_pats;
-
 /* ---------- 过滤层：替换后的 show 函数 ---------- */
 
 /* 保存 mounts 和 mountinfo 各自的原始 show 函数指针，由钩子入口处动态获取 */
@@ -174,17 +177,26 @@ static int filtered_mounts_show(struct seq_file *seq, void *v)
     seq->size = saved_size;
 
     if (ret == 0 && bytes_written > 0) {
+        int i;
+        bool hide = false;
+
         /* 先去重：检查当前行挂载点是否与上一行相同 */
         if (is_dup_mount_path(temp_buf, saved_buf, saved_count, false)) {
-            /* 重复行，丢弃 */
-            seq->count = saved_count;
+            hide = true;
         }
-        /* 再检查是否是需要隐藏的 KSU 行 */
-        else if (bytes_written >= 4 && memcmp(temp_buf, "KSU ", 4) == 0) {
-            /* 匹配 KSU 行，丢弃：直接恢复原 count，相当于没写入任何数据 */
+        /* 再检查是否匹配需隐藏的模式串 */
+        if (!hide) {
+            for (i = 0; i < mounts_nr_pats; i++) {
+                if (strstr(temp_buf, mounts_pats[i]) != NULL) {
+                    hide = true;
+                    break;
+                }
+            }
+        }
+        if (hide) {
             seq->count = saved_count;
         } else {
-            /* 非重复非 KSU 行，追加到原缓冲区末尾 */
+            /* 非重复非匹配行，追加到原缓冲区末尾 */
             if (saved_count + bytes_written <= saved_size) {
                 memcpy(saved_buf + saved_count, temp_buf, bytes_written);
                 seq->count = saved_count + bytes_written;
@@ -198,7 +210,6 @@ static int filtered_mounts_show(struct seq_file *seq, void *v)
         /* 原始 show 失败，恢复原 count */
         seq->count = saved_count;
     }
-
     kfree(temp_buf);
     return ret;
 }
@@ -398,8 +409,27 @@ static int __init hide_mounts_init(void)
 {
     int ret;
     char *p, *buf = NULL;
+/* ---- 解析 mounts 模式串 ---- */
+    mounts_pats[0] = "KSU ";
+    mounts_nr_pats = 1;
 
-    /* ---- 解析模式串 ---- */
+    if (mounts_extra[0] != '\0') {
+        buf = kstrndup(mounts_extra, sizeof(mounts_extra) - 1, GFP_KERNEL);
+        if (buf) {
+            while ((p = strsep(&buf, ",")) != NULL && mounts_nr_pats < MAX_PATTERNS) {
+                if (*p == '\0')
+                    continue;
+                if (strlen(p) > PATTERN_LEN_MAX)
+                    continue;
+                mounts_pats[mounts_nr_pats] = kstrdup(p, GFP_KERNEL);
+                if (mounts_pats[mounts_nr_pats])
+                    mounts_nr_pats++;
+            }
+            kfree(buf);
+        }
+    }
+
+    /* ---- 解析 mountinfo 模式串 ---- */
     minfo_pats[0] = " KSU ";
     minfo_nr_pats = 1;
 
@@ -426,13 +456,17 @@ static int __init hide_mounts_init(void)
         goto err_free_pats;
     }
 
-    printk(KERN_INFO "hide_mounts: loaded (%d mountinfo patterns)\n", minfo_nr_pats);
+    printk(KERN_INFO "hide_mounts: loaded (%d mounts, %d mountinfo patterns)\n",
+           mounts_nr_pats, minfo_nr_pats);
     return 0;
 
 err_free_pats: {
         int __i;
+        for (__i = 1; __i < mounts_nr_pats; __i++)
+            kfree(mounts_pats[__i]);
         for (__i = 1; __i < minfo_nr_pats; __i++)
             kfree(minfo_pats[__i]);
+        mounts_nr_pats = 0;
         minfo_nr_pats = 0;
         return ret;
     }
@@ -443,6 +477,10 @@ static void __exit hide_mounts_exit(void)
     int i;
 
     unregister_kretprobe(&kretp_seq_read_iter);
+
+    for (i = 1; i < mounts_nr_pats; i++)
+        kfree(mounts_pats[i]);
+    mounts_nr_pats = 0;
 
     for (i = 1; i < minfo_nr_pats; i++)
         kfree(minfo_pats[i]);
