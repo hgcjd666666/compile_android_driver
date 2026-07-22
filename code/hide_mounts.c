@@ -259,14 +259,14 @@ static int filtered_mountinfo_show(struct seq_file *seq, void *v)
                 seq->count = 0;
                 ret = -ENOSPC;
             }
+        }
     } else {
         seq->count = saved_count;
     }
 
     kfree(temp_buf);
     return ret;
-}
-/* ---------- seq_read_iter 钩子：临时替换 show ---------- */
+}/* ---------- seq_read_iter 钩子：临时替换 show ---------- */
 /**
  * struct read_iter_hook_data - 每次 seq_read_iter 钩子的上下文
  * @file:        当前被读取的文件结构体
