@@ -196,7 +196,6 @@ static void ensure_map_built(struct mount_cache *c)
         return;
     atomic_set(&c->map_ready, 1);
 }
-
 static struct mount_cache *cache_alloc
 static struct mount_cache *cache_alloc(struct seq_file *seq, struct file *file)
 {
