@@ -611,8 +611,10 @@ static int release_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 static int __init resolve_symbols(void)
 {
-    proc_mounts_open_ptr = (void *)kallsyms_lookup_name("proc_mounts_open");
-    seq_release_ptr = (void *)kallsyms_lookup_name("seq_release");
+    proc_mounts_open_ptr = (void *)kallsyms_lookup_name("mountinfo_open");
+tseq_release_ptr = (void *)kallsyms_lookup_name("seq_release");
+    if (!proc_mounts_open_ptr)
+        proc_mounts_open_ptr = (void *)kallsyms_lookup_name("proc_mounts_open");
     dentry_path_ptr = (void *)kallsyms_lookup_name("__dentry_path");
     if (!dentry_path_ptr)
         dentry_path_ptr = (void *)kallsyms_lookup_name("dentry_path_raw");
@@ -683,7 +685,7 @@ static int __init hide_mounts_init(void)
         goto err_pats;
     }
 
-    kp_open.kp.symbol_name = "proc_mounts_open";
+    kp_open.kp.symbol_name = "mountinfo_open";
     ret = register_kretprobe(&kp_open);
     if (ret < 0) {
         printk(KERN_ERR "hide_mounts: register proc_mounts_open failed: %d\n", ret);
@@ -698,7 +700,6 @@ static int __init hide_mounts_init(void)
         goto err_pats;
     }
 	printk(KERN_INFO "hide_mounts: loaded (Step 2)\n");
-");
 
 err_pats: {
         int i;
