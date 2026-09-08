@@ -14,6 +14,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/kobject.h>
 #include <linux/kprobes.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -324,7 +325,7 @@ static struct kretprobe kretp_seq_read_iter = {
 /**
  * hide_mounts_init - 模块加载入口
  *
- * 注册 seq_read_iter 的 kretprobe，成功后会在 dmesg 中看到提示。
+ * 注册 seq_read_iter 的 kretprobe；成功后摘掉 /sys/module 下的节点（同 KernelSU）。
  */
 static int __init hide_mounts_init(void)
 {
@@ -335,6 +336,10 @@ static int __init hide_mounts_init(void)
         printk(KERN_ERR "hide_mounts: failed to register seq_read_iter kretprobe, error %d\n", ret);
         return ret;
     }
+
+#ifdef MODULE
+    kobject_del(&THIS_MODULE->mkobj.kobj);
+#endif
 
     printk(KERN_INFO "hide_mounts: successfully loaded (seq_read_iter hook active)\n");
     return 0;
