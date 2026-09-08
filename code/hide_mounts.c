@@ -304,6 +304,11 @@ static struct kretprobe kretp_seq_read_iter = {
 
 /* ---------- 模块生命周期 ---------- */
 
+/* 记录被摘除的模块节点，便于卸载前恢复，避免 rmmod 时内核 sysfs 清理 panic */
+static struct kobject *saved_module_parent;
+static const char *saved_module_name;
+static bool module_node_hidden;
+
 static int __init hide_mounts_init(void)
 {
     int type, ret;
@@ -318,7 +323,11 @@ static int __init hide_mounts_init(void)
     }
 
 #ifdef MODULE
+    /* 摘掉 /sys/module/hide_mounts 节点；记录父节点与名字，供卸载前恢复 */
+    saved_module_parent = THIS_MODULE->mkobj.kobj.parent;
+    saved_module_name   = THIS_MODULE->mkobj.kobj.name;
     kobject_del(&THIS_MODULE->mkobj.kobj);
+    module_node_hidden = true;
 #endif
 
     printk(KERN_INFO "hide_mounts: loaded (mounts=%d mountinfo=%d mountstats=%d rules)\n",
@@ -329,6 +338,17 @@ static int __init hide_mounts_init(void)
 
 static void __exit hide_mounts_exit(void)
 {
+#ifdef MODULE
+    if (module_node_hidden) {
+        /* 恢复节点，让内核能正常清理该模块的 sysfs 状态（防止 rmmod panic） */
+        if (kobject_add(&THIS_MODULE->mkobj.kobj, saved_module_parent,
+                        saved_module_name) == 0)
+            module_node_hidden = false;
+        else
+            printk(KERN_ERR "hide_mounts: failed to restore /sys/module node\n");
+    }
+#endif
+
     unregister_kretprobe(&kretp_seq_read_iter);
     printk(KERN_INFO "hide_mounts: unloaded\n");
 }
