@@ -1,14 +1,21 @@
 // hide_mounts.c
 //
-// 内核模块：隐藏 debugfs 在以下三个文件中的挂载痕迹
-//   /proc/self/mounts     - 隐藏以 "debugfs " 开头的行
-//   /proc/self/mountinfo  - 隐藏包含 " - debugfs debugfs rw,seclabel,mode=755" 的行
-//   /proc/self/mountstats - 隐藏以 "device debugfs mounted on " 开头的行
-// 方法：kretprobe 劫持 seq_read_iter，在读文件前临时替换 show 函数，
-//       在数据生成点逐行过滤，首读即隐藏，无需修改 seq_read_iter 状态机。
+// 内核模块：隐藏 /proc/self/mounts、/proc/self/mountinfo、/proc/self/mountstats
+//           中用户指定的行。完全由 insmod 参数决定隐藏内容，不内置任何默认模式。
+// 方法：kretprobe 劫持 seq_read_iter，读文件前临时替换 show 函数，逐行过滤。
 //
-// 历史：旧版用于隐藏 KSU 挂载行（mounts 以 "KSU " 开头、mountinfo 含 " KSU "），
-//       现已改为隐藏 debugfs 痕迹，原 KSU 过滤逻辑被注释保留，不再生效。
+// 参数语法（每个文件一个参数，互不干扰）：
+//   - 参数内用 '|' 分隔多个匹配模式，命中任意一个即隐藏该行
+//   - 模式以 '?' 开头：子串匹配（可出现在行中间，等价 strstr）
+//   - 模式不以 '?' 开头：前缀匹配（须在行开头，等价 strncmp）
+//   - 空模式、'?' 后无内容的模式会被忽略
+//   未传对应参数（或全为空）则该文件不做任何过滤。
+//
+// 示例：
+//   insmod hide_mounts.ko \
+//       mounts="debugfs " \
+//       mountinfo="? - debugfs debugfs rw,seclabel,mode=755" \
+//       mountstats="device debugfs mounted on "
 //
 // 作者：hgcjd666666
 
@@ -23,8 +30,32 @@
 #include <linux/dcache.h>
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Hide debugfs mount traces from mounts/mountinfo/mountstats by on-the-fly show replacement");
+MODULE_DESCRIPTION("Hide user-specified mount lines from mounts/mountinfo/mountstats");
 MODULE_AUTHOR("hgcjd666666");
+
+/* ---------- 参数与模式解析 ---------- */
+
+#define HIDE_PARAM_LEN   4096   /* 单个参数总长度上限 */
+#define HIDE_MAX_PATTERNS 32    /* 每个文件允许的模式数量上限 */
+#define HIDE_PATTERN_LEN 256    /* 单个模式长度上限 */
+
+struct hide_pattern {
+    char text[HIDE_PATTERN_LEN];
+    bool substring;             /* true=子串匹配, false=前缀匹配 */
+};
+
+struct hide_file_rules {
+    int count;
+    struct hide_pattern pat[HIDE_MAX_PATTERNS];
+};
+
+/* 每个文件的模式串参数（不预设默认值，全靠 insmod 传入） */
+static char param_mounts[HIDE_PARAM_LEN] __read_mostly;
+static char param_mountinfo[HIDE_PARAM_LEN] __read_mostly;
+static char param_mountstats[HIDE_PARAM_LEN] __read_mostly;
+module_param_string(mounts, param_mounts, sizeof(param_mounts), 0);
+module_param_string(mountinfo, param_mountinfo, sizeof(param_mountinfo), 0);
+module_param_string(mountstats, param_mountstats, sizeof(param_mountstats), 0);
 
 /* ---------- 文件类型枚举 ---------- */
 
@@ -35,61 +66,65 @@ enum mount_file_type {
     FILE_COUNT,
 };
 
-/* ---------- 隐藏规则 ---------- */
-
-/*
- * ============================================================================
- * 旧版 KSU 隐藏逻辑（已废弃，仅注释保留，不再生效）
- *
- * mounts 的过滤 show：丢弃以 "KSU " 开头的行
- *     if (bytes_written >= 4 && memcmp(temp_buf, "KSU ", 4) == 0)
- *         seq->count = saved_count;   // 命中则丢弃
- *
- * mountinfo 的过滤 show：丢弃包含 " KSU " 的行
- *     if (strstr(temp_buf, " KSU ") != NULL)
- *         seq->count = saved_count;   // 命中则丢弃
- *
- * 现在改为隐藏 debugfs 挂载痕迹（见下方 mounts_is_hidden /
- * mountinfo_is_hidden / mountstats_is_hidden），KSU 相关行不再被过滤。
- * ============================================================================
- */
-
-/**
- * mounts 隐藏规则：行以 "debugfs " 开头（mounts 行的首字段是文件系统类型）
- */
-static bool mounts_is_hidden(const char *line)
+/* 解析 '|' 分隔、'?' 前缀的模式串到结构化规则。不信任输入：逐项限长限数。 */
+static void parse_rules(struct hide_file_rules *out, char *src)
 {
-    static const char prefix[] = "debugfs ";
-    return strncmp(line, prefix, sizeof(prefix) - 1) == 0;
+    char *tok, *rest;
+    struct hide_pattern *p;
+
+    out->count = 0;
+    if (!src || !src[0])
+        return;
+
+    rest = src;
+    while ((tok = strsep(&rest, "|")) != NULL) {
+        if (out->count >= HIDE_MAX_PATTERNS)
+            break;                 /* 数量超限：忽略剩余 */
+        if (tok[0] == '\0')
+            continue;              /* 空项忽略 */
+
+        p = &out->pat[out->count];
+        p->substring = false;
+        if (tok[0] == '?') {
+            p->substring = true;
+            tok++;
+        }
+        if (tok[0] == '\0')
+            continue;              /* "?" 单独无意义 */
+
+        strscpy(p->text, tok, sizeof(p->text));  /* 限长拷贝，天然加 NUL */
+        out->count++;
+    }
 }
 
-/**
- * mountinfo 隐藏规则：行中包含 " - debugfs debugfs rw,seclabel,mode=755"
- * （mountinfo 行以 " - <fstype> <source> <options>" 结尾，debugfs 特征在行尾段）
- */
-static bool mountinfo_is_hidden(const char *line)
-{
-    static const char marker[] = " - debugfs debugfs rw,seclabel,mode=755";
-    return strstr(line, marker) != NULL;
-}
-
-/**
- * mountstats 隐藏规则：行以 "device debugfs mounted on " 开头
- */
-static bool mountstats_is_hidden(const char *line)
-{
-    static const char prefix[] = "device debugfs mounted on ";
-    return strncmp(line, prefix, sizeof(prefix) - 1) == 0;
-}
-
-/**
- * 各文件类型对应的隐藏判定函数
- */
-static bool (*const hide_predicates[FILE_COUNT])(const char *) = {
-    [FILE_MOUNTS]     = mounts_is_hidden,
-    [FILE_MOUNTINFO]  = mountinfo_is_hidden,
-    [FILE_MOUNTSTATS] = mountstats_is_hidden,
+static struct hide_file_rules hide_rules[FILE_COUNT];
+static char *const param_src[FILE_COUNT] = {
+    [FILE_MOUNTS]     = param_mounts,
+    [FILE_MOUNTINFO]  = param_mountinfo,
+    [FILE_MOUNTSTATS] = param_mountstats,
 };
+
+/* 判定一行是否命中某文件的规则。line 必须以 NUL 结尾（由调用方保证）。 */
+static bool line_is_hidden(int type, const char *line)
+{
+    struct hide_file_rules *rules = &hide_rules[type];
+    struct hide_pattern *p;
+    size_t len;
+    int i;
+
+    for (i = 0; i < rules->count; i++) {
+        p = &rules->pat[i];
+        len = strlen(p->text);
+        if (p->substring) {
+            if (strstr(line, p->text))
+                return true;
+        } else {
+            if (strncmp(line, p->text, len) == 0)
+                return true;
+        }
+    }
+    return false;
+}
 
 /* ---------- 过滤层：替换后的 show 函数 ---------- */
 
@@ -97,42 +132,33 @@ static bool (*const hide_predicates[FILE_COUNT])(const char *) = {
 static int (*original_show[FILE_COUNT])(struct seq_file *seq, void *v);
 
 /**
- * filtered_show_common - 通用过滤 show：把原始 show 输出到临时缓冲区，
- *                       命中隐藏规则则丢弃整行，否则追加到真实缓冲区
- *
- * @seq:   seq_file
- * @v:     遍历到的位置对象
- * @type:  文件类型，决定使用哪条隐藏规则和哪个原始 show
+ * filtered_show_common - 把原始 show 输出到临时缓冲区（多留 1 字节置 NUL），
+ *                       命中规则则丢弃整行，否则追加到真实缓冲区
  */
 static int filtered_show_common(struct seq_file *seq, void *v, int type)
 {
-    char *temp_buf;           // 临时缓冲区，用于承载原始 show 的输出
-    size_t bytes_written;     // 原始 show 实际写入临时缓冲区的字节数
-    char *saved_buf;          // 保存原 m->buf
-    size_t saved_size;        // 保存原 m->size
-    size_t saved_count;       // 保存原 m->count
-    bool hidden;
+    char *temp_buf;           // 临时缓冲区，额外 1 字节用于 NUL 结尾
+    size_t bytes_written;
+    char *saved_buf;
+    size_t saved_size;
+    size_t saved_count;
     int ret;
 
     if (!original_show[type])
         return 0;
 
-    /* 分配临时缓冲区，大小与原缓冲区一致，确保不会溢出 */
-    temp_buf = kmalloc(seq->size, GFP_KERNEL);
-    if (!temp_buf) {
-        /* 内存不足时退化：直接调用原始 show 不进行过滤 */
+    temp_buf = kmalloc(seq->size + 1, GFP_KERNEL);
+    if (!temp_buf)
         return original_show[type](seq, v);
-    }
 
-    /* 保存 seq_file 缓冲区原始状态，并替换为临时缓冲区 */
     saved_buf   = seq->buf;
     saved_size  = seq->size;
     saved_count = seq->count;
 
     seq->buf   = temp_buf;
-    seq->count = 0;           // 从临时缓冲区起始位置开始写入
+    seq->size  = saved_size;      /* 保持原 size，避免 show 越过安全写入范围 */
+    seq->count = 0;
 
-    /* 调用原始 show，让其将一行数据输出到 temp_buf */
     ret = original_show[type](seq, v);
     bytes_written = seq->count;
 
@@ -140,25 +166,20 @@ static int filtered_show_common(struct seq_file *seq, void *v, int type)
     seq->buf  = saved_buf;
     seq->size = saved_size;
 
-    if (ret == 0 && bytes_written > 0) {
-        /* 判定是否命中本文件的隐藏规则 */
-        hidden = hide_predicates[type](temp_buf);
-        if (hidden) {
-            /* 命中隐藏规则，丢弃：直接恢复原 count，相当于没写入任何数据 */
-            seq->count = saved_count;
+    if (bytes_written <= seq->size)
+        temp_buf[bytes_written] = '\0';   /* NUL 结尾，供规则匹配安全使用 */
+
+    if (ret == 0 && bytes_written > 0 && line_is_hidden(type, temp_buf)) {
+        seq->count = saved_count;         /* 命中：丢弃 */
+    } else if (ret == 0 && bytes_written > 0) {
+        if (saved_count + bytes_written <= saved_size) {
+            memcpy(saved_buf + saved_count, temp_buf, bytes_written);
+            seq->count = saved_count + bytes_written;
         } else {
-            /* 未命中，追加到原缓冲区末尾 */
-            if (saved_count + bytes_written <= saved_size) {
-                memcpy(saved_buf + saved_count, temp_buf, bytes_written);
-                seq->count = saved_count + bytes_written;
-            } else {
-                /* 溢出保护：清空缓冲区并返回空间不足错误 */
-                seq->count = 0;
-                ret = -ENOSPC;
-            }
+            seq->count = 0;
+            ret = -ENOSPC;
         }
     } else {
-        /* 原始 show 失败，恢复原 count */
         seq->count = saved_count;
     }
 
@@ -166,7 +187,6 @@ static int filtered_show_common(struct seq_file *seq, void *v, int type)
     return ret;
 }
 
-/* 各文件类型对应的过滤 show 包装 */
 static int filtered_mounts_show(struct seq_file *seq, void *v)
 {
     return filtered_show_common(seq, v, FILE_MOUNTS);
@@ -180,14 +200,12 @@ static int filtered_mountstats_show(struct seq_file *seq, void *v)
     return filtered_show_common(seq, v, FILE_MOUNTSTATS);
 }
 
-/* 各文件类型对应的过滤 show 函数表 */
 static int (*const filtered_show[FILE_COUNT])(struct seq_file *, void *) = {
     [FILE_MOUNTS]     = filtered_mounts_show,
     [FILE_MOUNTINFO]  = filtered_mountinfo_show,
     [FILE_MOUNTSTATS] = filtered_mountstats_show,
 };
 
-/* 判断某个过滤 show 是否已经被安装到 seq->op 上（防御性检查） */
 static bool is_filtered_show(int (*show)(struct seq_file *, void *))
 {
     int i;
@@ -199,35 +217,15 @@ static bool is_filtered_show(int (*show)(struct seq_file *, void *))
 }
 
 /* ---------- seq_read_iter 钩子：临时替换 show ---------- */
-/**
- * struct read_iter_hook_data - 每次 seq_read_iter 钩子的上下文
- * @file:        当前被读取的文件结构体
- * @seq:         文件的 seq_file 私有数据
- * @old_ops:     原始的 seq_operations，需要在读完后恢复
- * @new_ops:     新分配的 seq_operations，替换后的 show 函数
- * @type:        识别出的文件类型（FILE_MOUNTS / FILE_MOUNTINFO / FILE_MOUNTSTATS）
- * @show_replaced: 标记本次调用中是否已替换 show，用于决定 ret 中是否恢复
- */
+
 struct read_iter_hook_data {
     struct file *file;
     struct seq_file *seq;
     const struct seq_operations *old_ops;
     struct seq_operations *new_ops;
-    int type;
     bool show_replaced;
 };
-/**
- * hook_seq_read_iter_entry - kretprobe 入口处理函数
- * @ri:   kretprobe 实例
- * @regs: 函数调用时的寄存器快照
- *
- * 在 seq_read_iter 执行前被调用。
- * 检查本次读取是否为 mounts / mountinfo / mountstats，若是则：
- * 1. 备份当前的 seq_operations。
- * 2. 分配新的 seq_operations，根据文件类型替换 show 为对应的过滤版本。
- * 3. 让 seq_file 的 op 指向新 ops。
- * 这样后续调用 show 时将直接执行我们的过滤版本。
- */
+
 static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct read_iter_hook_data *data = (struct read_iter_hook_data *)ri->data;
@@ -240,7 +238,6 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
 
     data->file          = file;
     data->show_replaced = false;
-    data->type          = -1;
 
     if (!file)
         return 0;
@@ -250,7 +247,6 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
     if (!seq || !seq->op || !file->f_path.dentry)
         return 0;
 
-    /* 只拦截 mounts / mountinfo / mountstats 文件 */
     fname = file->f_path.dentry->d_name.name;
     if (strcmp(fname, "mounts") == 0) {
         type = FILE_MOUNTS;
@@ -261,39 +257,27 @@ static int hook_seq_read_iter_entry(struct kretprobe_instance *ri, struct pt_reg
     } else {
         return 0;
     }
-    data->type = type;
 
-    /* 如果已经被替换，做防御检查 */
+    /* 该文件没有任何规则：不替换 show */
+    if (hide_rules[type].count == 0)
+        return 0;
     if (is_filtered_show(seq->op->show))
         return 0;
 
-    /* 备份当前 ops，创建新 ops 并替换 show */
     data->old_ops = seq->op;
     data->new_ops = kmalloc(sizeof(*(data->new_ops)), GFP_KERNEL);
     if (!data->new_ops)
         return 0;
 
-    /* 拷贝整个 ops 结构，替换为该文件类型的过滤 show */
     memcpy(data->new_ops, data->old_ops, sizeof(*(data->new_ops)));
     original_show[type] = data->old_ops->show;
     data->new_ops->show = filtered_show[type];
     seq->op = data->new_ops;
-
     data->show_replaced = true;
-
-    printk(KERN_INFO "hm: replaced show for type=%d (seq=%p)\n", type, seq);
 
     return 0;
 }
-/**
- * hook_seq_read_iter_ret - kretprobe 返回处理函数
- * @ri:   kretprobe 实例
- * @regs: 函数返回时的寄存器快照（此处未使用）
- *
- * 在 seq_read_iter 返回后调用，用于恢复原始的 seq_operations，
- * 并释放我们临时分配的新 ops 结构。
- * 无论本次读取是否成功，都应恢复原状，避免留下悬挂指针。
- */
+
 static int hook_seq_read_iter_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct read_iter_hook_data *data = (struct read_iter_hook_data *)ri->data;
@@ -301,7 +285,6 @@ static int hook_seq_read_iter_ret(struct kretprobe_instance *ri, struct pt_regs 
     if (!data->show_replaced || !data->seq)
         return 0;
 
-    /* 恢复原始 ops 并释放我们分配的结构 */
     data->seq->op = data->old_ops;
     kfree(data->new_ops);
     data->show_replaced = false;
@@ -309,12 +292,11 @@ static int hook_seq_read_iter_ret(struct kretprobe_instance *ri, struct pt_regs 
     return 0;
 }
 
-/* 定义 kretprobe 结构，挂载到导出函数 seq_read_iter */
 static struct kretprobe kretp_seq_read_iter = {
     .entry_handler = hook_seq_read_iter_entry,
     .handler       = hook_seq_read_iter_ret,
     .data_size     = sizeof(struct read_iter_hook_data),
-    .maxactive     = 0,                   // 0=内核自动选择，通常为 NR_CPUS 的倍数
+    .maxactive     = 0,
     .kp            = {
         .symbol_name = "seq_read_iter",
     },
@@ -322,14 +304,12 @@ static struct kretprobe kretp_seq_read_iter = {
 
 /* ---------- 模块生命周期 ---------- */
 
-/**
- * hide_mounts_init - 模块加载入口
- *
- * 注册 seq_read_iter 的 kretprobe；成功后摘掉 /sys/module 下的节点（同 KernelSU）。
- */
 static int __init hide_mounts_init(void)
 {
-    int ret;
+    int type, ret;
+
+    for (type = 0; type < FILE_COUNT; type++)
+        parse_rules(&hide_rules[type], param_src[type]);
 
     ret = register_kretprobe(&kretp_seq_read_iter);
     if (ret < 0) {
@@ -341,16 +321,12 @@ static int __init hide_mounts_init(void)
     kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 
-    printk(KERN_INFO "hide_mounts: successfully loaded (seq_read_iter hook active)\n");
+    printk(KERN_INFO "hide_mounts: loaded (mounts=%d mountinfo=%d mountstats=%d rules)\n",
+           hide_rules[FILE_MOUNTS].count, hide_rules[FILE_MOUNTINFO].count,
+           hide_rules[FILE_MOUNTSTATS].count);
     return 0;
 }
 
-/**
- * hide_mounts_exit - 模块卸载入口
- *
- * 注销 kretprobe。由于该钩子在每次读取后都会恢复 ops，没有残留状态，
- * 因此卸载时不需要额外清理悬挂指针。
- */
 static void __exit hide_mounts_exit(void)
 {
     unregister_kretprobe(&kretp_seq_read_iter);
